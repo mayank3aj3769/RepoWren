@@ -7,13 +7,10 @@ This document explains the current design in ordinary language. It is meant to h
 RepoWren is a small Python application with one local HTTP process. FastAPI validates a chat request, a chat service coordinates it, and an AirLLM backend generates text from a Hugging Face model.
 
 ```text
-developer
-    |
-    v
-terminal client
-    |
-    v
-FastAPI routes ---- health and status
+    API caller (curl, script, editor)
+        |
+        v
+    FastAPI routes ---- health and status
     |
     v
 chat service
@@ -39,7 +36,7 @@ The adapter only imports AirLLM and Torch when a model is actually loaded. That 
 
 ### `local_agent/api/app.py`
 
-Creates the FastAPI application and installs one inference backend in `application.state`. It also exposes `/health`, which checks only that the Python process is alive.
+Creates the FastAPI application and installs one inference backend in `application.state`. It also exposes `/health`, which checks only that the Python process is alive. There is no required terminal client or second executable.
 
 ### `local_agent/api/routes.py`
 
@@ -51,7 +48,7 @@ Contains Pydantic models for incoming messages and outgoing status data. Limits 
 
 ### `local_agent/services/chat.py`
 
-Knows the small NDJSON event format used by the terminal client:
+Knows the small NDJSON event format returned to any API caller:
 
 - `status` says that lazy loading has started;
 - `token` carries visible generated text;
@@ -95,7 +92,7 @@ The backend adds a model-specific folder below `AIRLLM_SHARDS_DIR`, so changing 
 
 ## One request from start to finish
 
-1. The terminal client appends the user's text to its conversation and sends JSON to `/v1/chat/stream`.
+1. A script, `curl`, Postman, or an editor sends JSON to `/v1/chat/stream`.
 2. FastAPI validates message roles, content length, temperature, and token limits.
 3. The chat service emits a loading status if the model is not ready.
 4. The AirLLM backend loads the model on the first request, or reuses the already initialized model.
@@ -103,7 +100,7 @@ The backend adds a model-specific folder below `AIRLLM_SHARDS_DIR`, so changing 
 6. Transformers generates in a worker thread. AirLLM moves one layer at a time between disk/CPU and GPU.
 7. The streamer returns visible text chunks to the async backend.
 8. The chat service wraps each chunk as a `token` event, then emits `done`.
-9. The terminal prints the chunks as they arrive.
+9. The API caller prints or renders the chunks as they arrive.
 
 If loading or generation fails, the backend raises `InferenceError` and the service emits an `error` event. `/status` remains useful because it reports the last state without pretending that an unloaded model is ready.
 
