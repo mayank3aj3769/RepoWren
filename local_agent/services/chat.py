@@ -1,4 +1,4 @@
-"""Coordinate a chat request without knowing llama.cpp's wire format."""
+"""Coordinate a chat request without depending on an inference engine."""
 
 from __future__ import annotations
 
@@ -6,17 +6,22 @@ import json
 from collections.abc import AsyncIterator
 
 from local_agent.api.schemas import ChatRequest
-from local_agent.inference.llama_cpp import InferenceError, LlamaCppClient
+from local_agent.inference.base import InferenceBackend, InferenceError
 
 
 class ChatService:
     """Convert model tokens into a small newline-delimited event protocol."""
 
-    def __init__(self, inference: LlamaCppClient) -> None:
+    def __init__(self, inference: InferenceBackend) -> None:
         self._inference = inference
 
     async def stream_events(self, request: ChatRequest) -> AsyncIterator[str]:
         try:
+            if self._inference.status != "ready":
+                yield self._event(
+                    "status",
+                    message=f"Loading {self._inference.model_id} with AirLLM...",
+                )
             async for text in self._inference.stream_chat(
                 request.messages,
                 max_tokens=request.max_tokens,

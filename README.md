@@ -1,134 +1,121 @@
 # RepoWren
 
-RepoWren is a lightweight, local-first coding agent. The current checkpoint is a small working chat path:
+RepoWren is a small, local-first coding agent. This branch uses [AirLLM](https://github.com/lyogavin/airllm) as the inference engine, so model weights are streamed layer by layer instead of being kept entirely in GPU memory.
+
+The current working slice is:
 
 ```text
-terminal -> FastAPI -> llama.cpp -> local Qwen model -> streamed response
+terminal client -> FastAPI -> AirLLM -> Hugging Face model
 ```
 
-Repository tools, code editing, PostgreSQL, and Git automation are deliberately deferred to later checkpoints. See `architecture.md` for the design in plain language.
+There is no separate llama.cpp executable or model server. The API process loads AirLLM lazily when the first chat request arrives.
 
-## Tested environment
+## GPU setup on Windows
 
-- Windows x64
-- Python 3.12
-- NVIDIA GTX 1650 with 4 GiB VRAM
-- llama.cpp build `b11503` with CUDA 12.4
-- `unsloth/Qwen3.5-2B-GGUF`, file `Qwen3.5-2B-Q5_K_M.gguf`
+The tested environment is Python 3.12, an NVIDIA GTX 1650 with 4 GiB VRAM, and an NVIDIA driver that supports CUDA 12.6. Check that the driver can see the GPU first:
 
-The model, llama.cpp binaries, virtual environment, caches, and `.env` file are local-only and are not committed to Git.
+```powershell
+nvidia-smi
+```
 
-## 1. Clone and create the virtual environment
-
-Open PowerShell in the cloned repository:
+Create the virtual environment in the repository and install the CUDA Torch wheel before installing RepoWren. Installing the normal PyPI Torch wheel can produce a CPU-only environment.
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install "torch==2.14.1+cu126" --index-url https://download.pytorch.org/whl/cu126
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-Verify the Python installation:
+Verify the GPU and dependencies:
 
 ```powershell
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-`pip check` should report `No broken requirements found`, and the test suite should pass.
+If you need a different CUDA wheel, choose a compatible Windows build from the [official PyTorch installation list](https://pytorch.org/get-started/previous-versions/). AirLLM itself requires Torch 2.4 or newer.
 
-## 2. Configure local settings
+## Configure the model
 
-Create your ignored `.env` from the committed example:
+Create the ignored local environment file:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-The default model is public, so `HF_TOKEN` can stay empty. For a private or gated Hugging Face repository, set your token only in `.env` or in the process environment:
+The example selects the small public coding model `Qwen/Qwen2.5-Coder-0.5B-Instruct`. Change `AIRLLM_MODEL_ID` to any compatible Hugging Face model when you are ready to try a larger model. The model name is configuration, not code.
+
+For a private or gated repository, set the token only in `.env` or in the process environment:
 
 ```dotenv
 HF_TOKEN=hf_your_token_here
 ```
 
-Environment variables already present in the shell take precedence over `.env`. Never commit `.env` or paste a token into `.env.example`.
+Never commit `.env` or model files. `.gitignore` excludes the environment file, Hugging Face cache, AirLLM layer shards, and common model weight formats.
 
-The configurable model fields are:
-
-```dotenv
-HF_MODEL_ID=unsloth/Qwen3.5-2B-GGUF
-HF_MODEL_FILE=Qwen3.5-2B-Q5_K_M.gguf
-HF_MODEL_REVISION=main
-HF_MODEL_DIR=models
-```
-
-`HF_MODEL_FILE` must name a GGUF supported by llama.cpp. The tested default has a pinned size and SHA-256 check. Hugging Face validates downloaded content for other configured models.
-
-Inspect the resolved settings without downloading:
+Inspect the resolved configuration without loading anything:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\download_model.py --show-config
+.\.venv\Scripts\python.exe .\scripts\prepare_model.py --show-config
 ```
 
-## 3. Download local dependencies
+## Download and prepare model weights
 
-Install the pinned Windows CUDA build of llama.cpp and its runtime libraries. This downloads approximately 626 MiB into the ignored `.runtime` directory:
+AirLLM downloads the configured repository from Hugging Face and creates reusable per-layer shards. Run this once before starting the API if you want to prepare the model explicitly:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\download_runtime.py
+.\.venv\Scripts\python.exe .\scripts\prepare_model.py
 ```
 
-Download the configured model into the ignored `models` directory:
+Original files are cached below `models/huggingface`. Split layer files are stored below `models/airllm/<model-name>`. Both locations are ignored by Git. The default keeps original files because they are useful when changing settings; set `AIRLLM_DELETE_ORIGINAL=true` only when disk space is more important than keeping that cache.
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\download_model.py
-```
+AirLLM compression is optional. Leave `AIRLLM_COMPRESSION` blank for the tested path. `4bit` and `8bit` compression require additional platform-specific packages and should be enabled only after checking the target machine.
 
-The default model is approximately 1.34 GiB. The Hugging Face downloader resumes cached downloads and uses `HF_TOKEN` when it is configured.
+## Run RepoWren
 
-## 4. Run RepoWren
-
-Start the model server in the first PowerShell terminal:
-
-```powershell
-.\scripts\start_model.ps1
-```
-
-Wait until the terminal says `model loaded`. The first generation after startup can be slow while CUDA compiles kernels.
-
-Start the Python API in a second terminal:
+Start the local API:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn local_agent.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-Start the terminal client in a third terminal:
+The first chat request loads the model if `prepare_model.py` was not run. Start the terminal client in another PowerShell window:
 
 ```powershell
 .\.venv\Scripts\local-agent.exe
 ```
 
-Enter `/exit` to stop the client. Stop each server with `Ctrl+C` in its terminal.
+Enter `/exit` to stop the client. The API and model stay on the local machine.
 
-## Local endpoints
+## Endpoints and benchmark
 
-- `GET http://127.0.0.1:8000/health`: Python API health
-- `GET http://127.0.0.1:8000/status`: API and model readiness
-- `POST http://127.0.0.1:8000/v1/chat/stream`: newline-delimited streaming chat
-- `GET http://127.0.0.1:8080/health`: llama.cpp health
+- `GET http://127.0.0.1:8000/health` confirms that the API process is alive.
+- `GET http://127.0.0.1:8000/status` reports `not_loaded`, `loading`, `ready`, or `error` and the configured model.
+- `POST http://127.0.0.1:8000/v1/chat/stream` returns newline-delimited status, token, done, or error events.
 
-Both servers bind to `127.0.0.1`, so they are not exposed to other computers by default.
-
-## Observed performance on the tested computer
-
-- Cold model load: about 43.5 seconds
-- First request after startup: about 45.6 seconds due to CUDA compilation
-- Warm time to first token: about 0.57 seconds
-- Warm generation: about 67 tokens/second
-- GPU memory after load: about 1,933 MiB total used
-
-Run the repeatable warm benchmark while the model server is active:
+Run a short GPU smoke benchmark while the API is active:
 
 ```powershell
 .\.venv\Scripts\python.exe .\benchmarks\inference.py
 ```
+
+Layer streaming uses less VRAM but is slower than keeping the whole model resident. The first request also pays model initialization cost. For the tested GTX 1650, a four-token warm probe completed successfully through the API after AirLLM prepared the model.
+
+## Project layout
+
+```text
+RepoWren/
+|-- local_agent/          Python package and application code
+|-- scripts/              model preparation helper
+|-- tests/                deterministic offline tests
+|-- benchmarks/           API smoke benchmark
+|-- docs/architecture.md  plain-language design explanation
+|-- pyproject.toml        dependencies and console entry point
+`-- .env.example          safe configuration template
+```
+
+The old `src/local_agent` wrapper was removed. `local_agent` remains a package because Python needs a package directory for imports; it is now at the repository root so the layout is easier to follow.
+
+For the design explained step by step, read [docs/architecture.md](docs/architecture.md).

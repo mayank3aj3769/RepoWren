@@ -45,18 +45,24 @@ def main() -> int:
                     json={"messages": messages, "max_tokens": args.max_tokens},
                 ) as response:
                     response.raise_for_status()
-                    print("agent> ", end="", flush=True)
+                    started_answer = False
                     for line in response.iter_lines():
                         if not line:
                             continue
                         event = json.loads(line)
-                        if event["type"] == "token":
+                        if event["type"] == "status":
+                            print(event["message"], file=sys.stderr)
+                        elif event["type"] == "token":
+                            if not started_answer:
+                                print("agent> ", end="", flush=True)
+                                started_answer = True
                             text = event["text"]
                             answer.append(text)
                             print(text, end="", flush=True)
                         elif event["type"] == "error":
                             raise RuntimeError(event["message"])
-                    print()
+                    if started_answer:
+                        print()
             except (httpx.HTTPError, json.JSONDecodeError, RuntimeError) as exc:
                 messages.pop()
                 print(f"request failed: {exc}", file=sys.stderr)

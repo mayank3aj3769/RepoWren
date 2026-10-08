@@ -21,7 +21,8 @@ class ChatRequest(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Readiness of the API and its separate model server."""
+    """State of the API and its lazily loaded model."""
 
     api: Literal["ok"] = "ok"
-    inference: Literal["ready", "unavailable"]
+    inference: Literal["not_loaded", "loading", "ready", "error"]
+    model: str

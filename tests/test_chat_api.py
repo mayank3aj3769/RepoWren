@@ -1,4 +1,4 @@
-"""Offline API tests with a fake inference client."""
+"""Offline API tests with a fake inference backend."""
 
 import asyncio
 import json
@@ -8,14 +8,14 @@ import httpx
 
 from local_agent.api.app import create_app
 from local_agent.api.schemas import ChatMessage
+from local_agent.inference.base import InferenceStatus
 
 
 class FakeInference:
-    def __init__(self, ready: bool = True) -> None:
-        self.ready = ready
+    model_id = "test/model"
 
-    async def is_ready(self) -> bool:
-        return self.ready
+    def __init__(self, status: InferenceStatus = "ready") -> None:
+        self.status = status
 
     async def stream_chat(
         self,
@@ -27,13 +27,14 @@ class FakeInference:
         assert messages[-1].content == "hello"
         assert max_tokens == 16
         assert temperature == 0.2
+        self.status = "ready"
         yield "Hello"
         yield " locally!"
 
 
-def test_stream_chat_returns_ordered_ndjson_events() -> None:
+def _post_chat(inference: FakeInference) -> httpx.Response:
     async def request_chat() -> httpx.Response:
-        app = create_app(FakeInference())  # type: ignore[arg-type]
+        app = create_app(inference)  # type: ignore[arg-type]
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
@@ -46,7 +47,11 @@ def test_stream_chat_returns_ordered_ndjson_events() -> None:
                 },
             )
 
-    response = asyncio.run(request_chat())
+    return asyncio.run(request_chat())
+
+
+def test_stream_chat_returns_ordered_ndjson_events() -> None:
+    response = _post_chat(FakeInference())
     events = [json.loads(line) for line in response.text.splitlines()]
 
     assert response.status_code == 200
@@ -57,19 +62,32 @@ def test_stream_chat_returns_ordered_ndjson_events() -> None:
     ]
 
 
-def test_chat_returns_503_when_model_server_is_unavailable() -> None:
-    async def request_chat() -> httpx.Response:
-        app = create_app(FakeInference(ready=False))  # type: ignore[arg-type]
+def test_chat_announces_lazy_model_loading() -> None:
+    response = _post_chat(FakeInference(status="not_loaded"))
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert response.status_code == 200
+    assert events[0] == {
+        "type": "status",
+        "message": "Loading test/model with AirLLM...",
+    }
+    assert events[-1] == {"type": "done"}
+
+
+def test_status_reports_model_without_loading_it() -> None:
+    async def request_status() -> httpx.Response:
+        app = create_app(FakeInference(status="not_loaded"))  # type: ignore[arg-type]
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
         ) as client:
-            return await client.post(
-                "/v1/chat/stream",
-                json={"messages": [{"role": "user", "content": "hello"}]},
-            )
+            return await client.get("/status")
 
-    response = asyncio.run(request_chat())
+    response = asyncio.run(request_status())
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "The local llama.cpp server is not ready."
+    assert response.status_code == 200
+    assert response.json() == {
+        "api": "ok",
+        "inference": "not_loaded",
+        "model": "test/model",
+    }
