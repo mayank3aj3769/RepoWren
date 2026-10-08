@@ -215,10 +215,18 @@ tempCodeRunnerFile.py
 .env.*
 !.env.example
 .runtime/
+.tmp-airllm/
 models/
 *.gguf
 *.safetensors
 llama-server*.log
+*.pt
+*.bin
+*.pth
+*.ckpt
+*.onnx
+*.safetensors.index.json
+*.lock
 
 # Marimo
 marimo/_static/
