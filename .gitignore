@@ -211,6 +211,15 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# RepoWren local state and large binary dependencies
+.env.*
+!.env.example
+.runtime/
+models/
+*.gguf
+*.safetensors
+llama-server*.log
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
