@@ -21,9 +21,6 @@ dev = [
     "pytest>=8,<10",
 ]
 
-[project.scripts]
-local-agent = "local_agent.cli:main"
-
 [tool.setuptools.packages.find]
 include = ["local_agent*"]
 

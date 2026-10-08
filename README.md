@@ -5,7 +5,7 @@ RepoWren is a small, local-first coding agent. This branch uses [AirLLM](https:/
 The current working slice is:
 
 ```text
-terminal client -> FastAPI -> AirLLM -> Hugging Face model
+API caller -> FastAPI -> AirLLM -> Hugging Face model
 ```
 
 There is no separate llama.cpp executable or model server. The API process loads AirLLM lazily when the first chat request arrives.
@@ -81,13 +81,14 @@ Start the local API:
 .\.venv\Scripts\python.exe -m uvicorn local_agent.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-The first chat request loads the model if `prepare_model.py` was not run. Start the terminal client in another PowerShell window:
+The first chat request loads the model if `prepare_model.py` was not run. Start the API above, then call it directly from your own script, `curl`, Postman, or an editor integration. For a quick PowerShell smoke request:
 
 ```powershell
-.\.venv\Scripts\local-agent.exe
+$body = '{"messages":[{"role":"user","content":"Reply with one short word."}],"max_tokens":4,"temperature":0.0}'
+curl.exe -N -H "Content-Type: application/json" -d $body http://127.0.0.1:8000/v1/chat/stream
 ```
 
-Enter `/exit` to stop the client. The API and model stay on the local machine.
+There is intentionally no `local-agent.exe` entry point now. If that file still appears in an existing `.venv`, it is a stale artifact from an older installation; recreate the virtual environment or uninstall/reinstall RepoWren after pulling this change.
 
 ## Endpoints and benchmark
 
@@ -107,12 +108,12 @@ Layer streaming uses less VRAM but is slower than keeping the whole model reside
 
 ```text
 RepoWren/
-|-- local_agent/          Python package and application code
+|-- local_agent/          Python package and API code
 |-- scripts/              model preparation helper
 |-- tests/                deterministic offline tests
 |-- benchmarks/           API smoke benchmark
 |-- docs/architecture.md  plain-language design explanation
-|-- pyproject.toml        dependencies and console entry point
+|-- pyproject.toml        dependencies and package metadata
 `-- .env.example          safe configuration template
 ```
 
