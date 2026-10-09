@@ -2,7 +2,12 @@
 
 import pytest
 
-from repowren.config import DEFAULT_MODEL_ID, DEFAULT_VLLM_BASE_URL, Settings
+from repowren.config import (
+    DEFAULT_DATABASE_URL,
+    DEFAULT_MODEL_ID,
+    DEFAULT_VLLM_BASE_URL,
+    Settings,
+)
 
 
 def test_settings_use_small_public_qwen_by_default(
@@ -14,6 +19,7 @@ def test_settings_use_small_public_qwen_by_default(
         "HF_TOKEN",
         "LOCAL_AGENT_API_URL",
         "REPOWREN_API_URL",
+        "DATABASE_URL",
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -22,6 +28,7 @@ def test_settings_use_small_public_qwen_by_default(
 
     assert settings.model_id == DEFAULT_MODEL_ID
     assert settings.vllm_base_url == DEFAULT_VLLM_BASE_URL
+    assert settings.database_url == DEFAULT_DATABASE_URL
 
 
 def test_settings_read_vllm_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,3 +47,11 @@ def test_settings_read_repowren_api_url(monkeypatch: pytest.MonkeyPatch) -> None
     settings = Settings.from_environment()
 
     assert settings.api_url == "http://127.0.0.1:9100"
+
+
+def test_settings_read_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost/example")
+
+    settings = Settings.from_environment()
+
+    assert settings.database_url == "postgresql://user:pass@localhost/example"

@@ -1,33 +1,37 @@
 # RepoWren architecture
 
-RepoWren is a modular monolith with one external inference service. The Python
-application owns user interaction and orchestration; the Docker container owns
-model loading and GPU execution.
+RepoWren is a modular monolith with two external Docker services. The Python
+application owns user interaction, repository safety, and orchestration; vLLM
+owns model loading and GPU execution, while PostgreSQL stores repository and
+file metadata.
 
 ```mermaid
 flowchart TD
     U[User] --> C[Terminal client]
     C --> A[FastAPI backend]
     A --> S[Chat service]
+    A --> R[Repository service]
+    R --> F[Local Git repository]
+    R --> P[(PostgreSQL)]
     S --> I[vLLM HTTP adapter]
     I --> V[vLLM Docker container]
     V --> G[NVIDIA GPU]
 
-    A -. next milestone .-> R[Repository tools]
-    A -. later milestone .-> P[PostgreSQL memory]
 ```
 
 ## Current milestone
 
-The current milestone provides a complete local chat path:
+The current milestone provides a repository-aware local chat path:
 
 1. `repowren-chat` reads a prompt and keeps the active conversation in memory.
-2. The client posts validated messages to `POST /v1/chat/stream`.
-3. `ChatService` coordinates the request without depending on Docker details.
-4. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
+2. Repository commands register, select, list, read, and search local Git roots.
+3. The repository service validates all paths and builds bounded source excerpts.
+4. Repository-aware chat prepends those excerpts to validated messages.
+5. `ChatService` coordinates the request without depending on Docker details.
+6. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
    endpoint.
-5. Generated text deltas become small newline-delimited API events.
-6. The terminal client prints each token as it arrives.
+7. Generated text deltas become small newline-delimited API events.
+8. The terminal client prints each token as it arrives.
 
 RepoWren and vLLM remain separate processes. The API does not install Torch,
 load model weights, reserve GPU memory, or depend on Docker libraries. It only
@@ -37,10 +41,24 @@ needs the HTTP URL in `VLLM_BASE_URL`.
 
 ### `repowren/api`
 
-`app.py` creates the FastAPI application and closes the inference HTTP client
-during shutdown. `routes.py` exposes health, model status, and streamed chat.
-`schemas.py` bounds message sizes, message counts, token counts, and temperature
-before requests reach inference.
+`app.py` creates the FastAPI application, applies database migrations at
+startup, and closes owned resources during shutdown. `routes.py` exposes
+health, model status, repository tools, and streamed chat. `schemas.py` bounds
+messages, paths, searches, result counts, token counts, and temperature.
+
+### `repowren/repositories`
+
+`service.py` owns the repository security boundary. It canonicalizes Git roots,
+rejects traversal and symlink escape, respects root `.gitignore`, skips secrets,
+binary/generated/model files, and bounds file sizes and result counts. Context
+construction uses simple request keywords and line-numbered excerpts; it does
+not use embeddings in this phase.
+
+### `repowren/persistence`
+
+`postgres.py` persists repositories, the active selection, and file hashes and
+metadata through a narrow store interface. Packaged SQL migrations run once and
+are recorded in `schema_migrations`.
 
 ### `repowren/services`
 
@@ -62,9 +80,9 @@ same API without changing the backend.
 
 ### `compose.yaml`
 
-Docker Compose runs only vLLM. It grants the container one NVIDIA GPU, maps host
-port `8001` to vLLM port `8000`, and persists model and compilation caches in
-named volumes. Docker Compose commands provide the complete lifecycle interface.
+Docker Compose runs vLLM and PostgreSQL. It grants vLLM one NVIDIA GPU, maps host
+port `8001` to vLLM port `8000`, and persists model, compilation, and database
+data in named volumes. Docker Compose commands provide the lifecycle interface.
 `Dockerfile.vllm` derives from the pinned official CUDA 12.9 image and removes
 the optional TorchCodec multimedia decoder. RepoWren serves text, and the
 current TorchCodec binary is linked against CUDA 13, so retaining it prevents
@@ -83,6 +101,9 @@ Process variables take precedence over the ignored `.env` file.
 - `VLLM_DTYPE` selects the model data type.
 - `HF_TOKEN` optionally authenticates gated model downloads.
 - `REPOWREN_API_URL` tells the terminal client where the API is reachable.
+- `DATABASE_URL` tells the API where PostgreSQL is reachable.
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `POSTGRES_PORT`
+  configure the Compose database service.
 
 ## Why Docker is the only vLLM installation path
 
@@ -97,9 +118,10 @@ RepoWren.
 
 ## Testing boundaries
 
-Offline tests use fake inference backends and `httpx.MockTransport`. They test
-validation, readiness states, event ordering, SSE parsing, and terminal output
-without Docker, a GPU, or a model download.
+Offline tests use fake inference backends, an in-memory repository store, and
+`httpx.MockTransport`. They test repository boundaries, ignored files, context
+construction, validation, event ordering, and terminal output without Docker,
+a GPU, a database, or a model download.
 
 Hardware validation is intentionally separate:
 
@@ -109,14 +131,11 @@ Hardware validation is intentionally separate:
 4. Check RepoWren `/status`.
 5. Run `repowren-chat` and `benchmarks/inference.py`.
 
-## Next milestone: repository-aware assistant
+## Safety boundary and next milestone
 
-After this milestone is accepted, RepoWren can add repository registration,
-workspace-boundary validation, file listing, safe file reading, and basic text
-search. That work should introduce a small orchestration layer and PostgreSQL
-repository metadata without adding embeddings or code editing yet.
-
-Later milestones can add persistent code chunks and pgvector retrieval,
-approval-controlled patches and tests, then approval-controlled Git operations.
-The terminal client, FastAPI boundary, and inference interface can remain
-unchanged as those capabilities grow.
+Phase 2 is read-only. Repository tools cannot modify source, execute commands,
+or perform Git operations. The database contains metadata, not copied source
+contents. Later milestones can add persistent code chunks and pgvector
+retrieval, approval-controlled patches and tests, then approval-controlled Git
+operations. The terminal client, FastAPI boundary, and inference interface can
+remain unchanged as those capabilities grow.
