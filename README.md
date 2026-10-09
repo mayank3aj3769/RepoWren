@@ -35,7 +35,7 @@ Set `HF_TOKEN` only when the model repository requires authentication. The
 default public model does not require one. Important settings include:
 
 ```dotenv
-VLLM_IMAGE=vllm/vllm-openai:latest-cu129
+VLLM_IMAGE=vllm/vllm-openai:v0.31.0-cu129
 VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
 VLLM_BASE_URL=http://127.0.0.1:8001
 VLLM_PORT=8001
@@ -66,14 +66,16 @@ Start the container:
 docker compose up -d
 ```
 
-The first start pulls the image and downloads the model into Docker-managed
-volumes. Follow progress or inspect container state with:
+The first start pulls the official CUDA 12.9 image, builds a tiny local layer,
+and downloads the model into Docker-managed volumes. The local layer removes
+TorchCodec because RepoWren serves text only and the current TorchCodec binary
+in this image expects CUDA 13. Follow progress or inspect container state with:
 
 ```text
 docker compose logs -f vllm
 docker compose ps
 docker compose down
-docker compose pull vllm
+docker compose build --pull vllm
 ```
 
 The Compose file reserves one NVIDIA GPU, persists Hugging Face and vLLM
@@ -155,6 +157,7 @@ RepoWren/
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
 |-- docs/architecture.md  architecture and milestone boundaries
+|-- Dockerfile.vllm       text-only compatibility layer over official vLLM
 |-- compose.yaml          Docker vLLM service
 |-- pyproject.toml        package metadata and dependencies
 `-- .env.example          safe local configuration template
