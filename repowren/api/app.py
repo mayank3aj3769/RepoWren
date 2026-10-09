@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+"""FastAPI application and console entry point."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -7,10 +7,10 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from local_agent.api.routes import router
-from local_agent.config import Settings
-from local_agent.inference.vllm import VLLMClient
-from local_agent.inference.base import InferenceBackend
+from repowren.api.routes import router
+from repowren.config import Settings
+from repowren.inference.base import InferenceBackend
+from repowren.inference.vllm import VLLMClient
 
 
 class HealthResponse(BaseModel):
@@ -33,9 +33,9 @@ def create_app(inference: InferenceBackend | None = None) -> FastAPI:
             await inference.close()
 
     application = FastAPI(
-        title="Local Coding Agent",
-        description="Local HTTP backend for the coding agent.",
-        version="0.4.0",
+        title="RepoWren",
+        description="Local HTTP backend for the RepoWren coding agent.",
+        version="0.5.0",
         lifespan=lifespan,
     )
     application.state.inference = inference
@@ -50,3 +50,10 @@ def create_app(inference: InferenceBackend | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def main() -> None:
+    """Run the development API server from the ``repowren-api`` command."""
+    import uvicorn
+
+    uvicorn.run("repowren.api.app:app", host="127.0.0.1", port=8000)

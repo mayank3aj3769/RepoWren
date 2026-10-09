@@ -1,1 +1,0 @@
-"""Local coding agent package."""

@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from local_agent.api.app import app
+from repowren.api.app import app
 
 
 def test_health_returns_ok() -> None:

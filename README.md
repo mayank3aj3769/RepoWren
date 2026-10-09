@@ -1,138 +1,164 @@
 # RepoWren
 
-RepoWren is a small, local-first coding-agent API. A lightweight FastAPI process validates chat requests and forwards them to a separate [vLLM](https://github.com/vllm-project/vllm) model server through its OpenAI-compatible API.
+RepoWren is a lightweight, local-first coding-agent foundation. A terminal
+client talks to a small FastAPI backend, and the backend streams generated text
+from a separate vLLM server running in Docker.
 
 ```text
-client -> RepoWren API :8000 -> vLLM :8001 -> model on GPU
+terminal -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
 ```
 
-Keeping inference in a separate process prevents CUDA and model-serving dependencies from being installed in the API environment. The vLLM server may run locally, in a container, or on another reachable machine.
+This milestone deliberately stays small. Repository tools, PostgreSQL-backed
+memory, indexing, and code editing will be added incrementally after the local
+chat path is working reliably.
 
 ## Requirements
 
-- Python 3.12 or newer for RepoWren.
-- A running vLLM server with a supported GPU environment.
-- Enough disk space for the selected model and the Hugging Face download cache.
+- Windows with Docker Desktop running Linux containers.
+- Docker Desktop GPU support enabled with an NVIDIA driver and WSL 2 backend.
+- Python 3.12 or newer for the RepoWren API and terminal client.
+- Enough storage for the vLLM image and the selected Hugging Face model.
+
+The default model is `Qwen/Qwen2.5-Coder-0.5B-Instruct`. It is intentionally
+small enough for initial validation on a GTX 1650 with 4 GB VRAM. Larger models
+are outside the current milestone.
 
 ## Configure RepoWren
 
-Create the local environment file:
+Create the ignored local environment file:
 
-```bash
-cp .env.example .env
+```text
+copy .env.example .env
 ```
 
-The important settings are:
+Set `HF_TOKEN` only when the model repository requires authentication. The
+default public model does not require one. Important settings include:
 
 ```dotenv
+VLLM_IMAGE=vllm/vllm-openai:latest-cu129
 VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
 VLLM_BASE_URL=http://127.0.0.1:8001
-LOCAL_AGENT_API_URL=http://127.0.0.1:8000
+VLLM_PORT=8001
+REPOWREN_API_URL=http://127.0.0.1:8000
 ```
 
-Set `HF_TOKEN` only when the selected Hugging Face repository requires authentication. `.env`, virtual environments, model caches, and model-weight formats are excluded from Git.
+Secrets, model weights, caches, and virtual environments are excluded from Git.
 
-## Install the API
+## Install the API and terminal client
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```text
+python -m venv .venv
+.venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 python -m pip check
 python -m pytest -q
 ```
 
-The API environment intentionally does not install Torch or vLLM.
+The Python environment remains small because Torch, CUDA, and vLLM stay inside
+the Docker image.
 
-## Start vLLM
+## Start vLLM in Docker
 
-The simplest isolated setup is the official vLLM container. The following command exposes the model server on port `8001` and keeps downloaded weights in the local Hugging Face cache:
+Start the container:
 
-```bash
-docker run --rm --gpus all --ipc=host \
-  -p 8001:8000 \
-  -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
-  --env HF_TOKEN \
-  --entrypoint /bin/bash \
-  vllm/vllm-openai:latest-cu129 \
-  -lc 'python3 -m pip uninstall -y torchcodec --root-user-action=ignore >/dev/null && exec vllm serve Qwen/Qwen2.5-Coder-0.5B-Instruct --host 0.0.0.0 --port 8000 --max-model-len 2048 --gpu-memory-utilization 0.75 --dtype half --enforce-eager'
+```text
+docker compose up -d
 ```
 
-The temporary `torchcodec` removal avoids a CUDA-version mismatch in the current CUDA 12.9 image. RepoWren serves text, so it does not require the optional audio/video decoder. The image itself is not modified.
+The first start pulls the image and downloads the model into Docker-managed
+volumes. Follow progress or inspect container state with:
 
-For a native Linux installation, the included shell helpers install and start the configured CUDA build:
-
-```bash
-bash scripts/setup_vllm_wsl.sh
-bash scripts/start_vllm.sh
+```text
+docker compose logs -f vllm
+docker compose ps
+docker compose down
+docker compose pull vllm
 ```
 
-The setup helper installs vLLM once in `${VLLM_VENV_DIR:-$HOME/.venvs/repowren-vllm}`. Later starts only require `scripts/start_vllm.sh`. The defaults can be changed in `.env`; verify that the selected vLLM wheel, CUDA backend, GPU, and driver are compatible before changing them.
+The Compose file reserves one NVIDIA GPU, persists Hugging Face and vLLM
+compile caches, and exposes the container's port `8000` as host port `8001`.
 
-Wait for vLLM to finish loading, then check it directly:
+Check vLLM directly once it finishes loading:
 
-```bash
+```text
 curl http://127.0.0.1:8001/health
 curl http://127.0.0.1:8001/v1/models
 ```
 
 ## Start RepoWren
 
-In another terminal with the API environment activated:
+In a second terminal:
 
-```bash
-python -m uvicorn local_agent.api.app:app --host 127.0.0.1 --port 8000
+```text
+.venv\Scripts\activate
+repowren-api
 ```
 
-Check both the API process and its connection to vLLM:
+Check both the API and its connection to vLLM:
 
-```bash
+```text
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/status
 ```
 
-Send a streamed chat request:
+## Chat from the terminal
 
-```bash
-curl -N \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Reply with one short word."}],"max_tokens":16,"temperature":0.0}' \
-  http://127.0.0.1:8000/v1/chat/stream
+In a third terminal with the virtual environment activated:
+
+```text
+repowren-chat
 ```
 
-The response is newline-delimited JSON containing `status`, `token`, `done`, or `error` events.
+The client keeps the current conversation in memory and streams model output as
+it arrives. Type `/exit` or `/quit` to finish.
 
-## API endpoints
+The HTTP API remains available to other clients:
 
-- `GET /health` confirms that the RepoWren API process is running.
+- `GET /health` confirms that the RepoWren process is running.
 - `GET /status` checks vLLM readiness and reports the configured model.
-- `POST /v1/chat/stream` accepts chat messages and streams RepoWren events.
+- `POST /v1/chat/stream` streams newline-delimited `status`, `token`, `done`,
+  and `error` events.
 
-Run the small end-to-end timing probe while both services are active:
+## Benchmark
 
-```bash
+With both services running, measure one end-to-end response:
+
+```text
 python benchmarks/inference.py
 ```
 
+The probe reports time to first text and total request time. Docker Desktop and
+`nvidia-smi` can be used separately to observe peak RAM and VRAM.
+
 ## Troubleshooting
 
-- `/health` on port `8000` only checks RepoWren. Use `/status` to verify that vLLM is reachable.
-- If the first vLLM start fails during a model download, check free space in the mounted Hugging Face cache and retry after removing any incomplete download.
-- If vLLM reports an out-of-memory error, lower `VLLM_MAX_MODEL_LEN` or `VLLM_GPU_MEMORY_UTILIZATION`, or choose a smaller model.
-- Keep `HF_TOKEN`, model weights, caches, and local environment files out of commits.
+- If the Docker command is missing, start Docker Desktop and add its
+  `resources\bin` directory to `PATH`.
+- Docker GPU passthrough on Windows requires Linux containers and Docker
+  Desktop's WSL 2 backend. RepoWren no longer installs or runs vLLM inside the
+  user's Ubuntu distribution.
+- `/health` on port `8000` checks only RepoWren. Use `/status` or vLLM's port
+  `8001` to verify inference readiness.
+- The first container start may be slow while the image and model are
+  downloaded. Inspect `docker compose logs -f vllm` before assuming it failed.
+- If vLLM runs out of memory, reduce `VLLM_MAX_MODEL_LEN` or
+  `VLLM_GPU_MEMORY_UTILIZATION`; do not select a larger model for this GPU.
+- If port `8001` is occupied, change both `VLLM_PORT` and `VLLM_BASE_URL` in
+  `.env`.
 
 ## Project layout
 
 ```text
 RepoWren/
-|-- local_agent/          FastAPI application and vLLM HTTP adapter
-|-- scripts/              optional vLLM and API launch helpers
+|-- repowren/             API, terminal client, services, and vLLM adapter
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
-|-- docs/architecture.md  plain-language architecture guide
-|-- pyproject.toml        API dependencies and package metadata
-`-- .env.example          safe configuration template
+|-- docs/architecture.md  architecture and milestone boundaries
+|-- compose.yaml          Docker vLLM service
+|-- pyproject.toml        package metadata and dependencies
+`-- .env.example          safe local configuration template
 ```
 
-Read [docs/architecture.md](docs/architecture.md) for a step-by-step explanation of the request path.
+See [docs/architecture.md](docs/architecture.md) for the request flow and the
+next architectural milestone.

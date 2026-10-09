@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "local-coding-agent"
-version = "0.1.0"
+name = "repowren"
+version = "0.2.0"
 description = "A small, local-first AI coding agent built one milestone at a time."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,13 +15,17 @@ dependencies = [
     "uvicorn>=0.32,<1",
 ]
 
+[project.scripts]
+repowren-api = "repowren.api.app:main"
+repowren-chat = "repowren.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<10",
 ]
 
 [tool.setuptools.packages.find]
-include = ["local_agent*"]
+include = ["repowren*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

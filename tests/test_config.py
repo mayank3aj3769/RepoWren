@@ -2,7 +2,7 @@
 
 import pytest
 
-from local_agent.config import DEFAULT_MODEL_ID, DEFAULT_VLLM_BASE_URL, Settings
+from repowren.config import DEFAULT_MODEL_ID, DEFAULT_VLLM_BASE_URL, Settings
 
 
 def test_settings_use_small_public_qwen_by_default(
@@ -13,6 +13,7 @@ def test_settings_use_small_public_qwen_by_default(
         "VLLM_BASE_URL",
         "HF_TOKEN",
         "LOCAL_AGENT_API_URL",
+        "REPOWREN_API_URL",
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -31,3 +32,11 @@ def test_settings_read_vllm_options(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.model_id == "owner/large-model"
     assert settings.vllm_base_url == "http://127.0.0.1:9001"
+
+
+def test_settings_read_repowren_api_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPOWREN_API_URL", "http://127.0.0.1:9100/")
+
+    settings = Settings.from_environment()
+
+    assert settings.api_url == "http://127.0.0.1:9100"

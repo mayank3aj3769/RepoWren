@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
-from local_agent.api.schemas import ChatRequest
-from local_agent.inference.base import InferenceBackend, InferenceError
+from repowren.api.schemas import ChatRequest
+from repowren.inference.base import InferenceBackend, InferenceError
 
 
 class ChatService:

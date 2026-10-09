@@ -32,5 +32,8 @@ class Settings:
         return cls(
             model_id=os.getenv("VLLM_MODEL_ID", DEFAULT_MODEL_ID).strip(),
             vllm_base_url=os.getenv("VLLM_BASE_URL", DEFAULT_VLLM_BASE_URL).rstrip("/"),
-            api_url=os.getenv("LOCAL_AGENT_API_URL", DEFAULT_API_URL),
+            api_url=os.getenv(
+                "REPOWREN_API_URL",
+                os.getenv("LOCAL_AGENT_API_URL", DEFAULT_API_URL),
+            ).rstrip("/"),
         )

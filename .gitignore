@@ -212,16 +212,15 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
-# RepoWren local state and large binary dependencies
+# RepoWren local state and model data
 .env.*
 !.env.example
 .runtime/
-.tmp-airllm/
 /docs/chat-context.md
+chat-context.local.md
 models/
 *.gguf
 *.safetensors
-llama-server*.log
 *.pt
 *.bin
 *.pth
