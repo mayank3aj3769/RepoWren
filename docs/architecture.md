@@ -65,6 +65,10 @@ same API without changing the backend.
 Docker Compose runs only vLLM. It grants the container one NVIDIA GPU, maps host
 port `8001` to vLLM port `8000`, and persists model and compilation caches in
 named volumes. Docker Compose commands provide the complete lifecycle interface.
+`Dockerfile.vllm` derives from the pinned official CUDA 12.9 image and removes
+the optional TorchCodec multimedia decoder. RepoWren serves text, and the
+current TorchCodec binary is linked against CUDA 13, so retaining it prevents
+vLLM from importing on the CUDA 12.9 image.
 
 ## Configuration
 
