@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Literal, Protocol
 
-from local_agent.api.schemas import ChatMessage
+from repowren.api.schemas import ChatMessage
 
 
 InferenceStatus = Literal["not_loaded", "loading", "ready", "error"]

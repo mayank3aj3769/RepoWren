@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from local_agent.config import Settings
+from repowren.config import Settings
 
 
 def main() -> int:

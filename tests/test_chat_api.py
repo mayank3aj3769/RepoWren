@@ -6,9 +6,9 @@ from collections.abc import AsyncIterator, Sequence
 
 import httpx
 
-from local_agent.api.app import create_app
-from local_agent.api.schemas import ChatMessage
-from local_agent.inference.base import InferenceStatus
+from repowren.api.app import create_app
+from repowren.api.schemas import ChatMessage
+from repowren.inference.base import InferenceStatus
 
 
 class FakeInference:

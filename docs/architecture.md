@@ -1,115 +1,118 @@
 # RepoWren architecture
 
-This document explains the design in simple terms for a developer who knows ordinary Python and HTTP but does not know vLLM internals.
+RepoWren is a modular monolith with one external inference service. The Python
+application owns user interaction and orchestration; the Docker container owns
+model loading and GPU execution.
 
-## The short version
+```mermaid
+flowchart TD
+    U[User] --> C[Terminal client]
+    C --> A[FastAPI backend]
+    A --> S[Chat service]
+    S --> I[vLLM HTTP adapter]
+    I --> V[vLLM Docker container]
+    V --> G[NVIDIA GPU]
 
-RepoWren has two independent processes:
-
-1. A FastAPI process accepts and validates requests from a terminal, editor, or other client.
-2. A vLLM process owns the model and uses the GPU to generate text.
-
-They communicate over HTTP. The RepoWren API does not import Torch, reserve GPU memory, or load model weights.
-
-```text
-API caller
-   |
-   v
-RepoWren FastAPI :8000
-   |
-   | OpenAI-compatible HTTP request
-   v
-vLLM model server :8001
-   |
-   v
-Hugging Face model + GPU
+    A -. next milestone .-> R[Repository tools]
+    A -. later milestone .-> P[PostgreSQL memory]
 ```
 
-The two processes can run on the same machine or on different machines. RepoWren only needs the URL stored in `VLLM_BASE_URL`.
+## Current milestone
 
-## What each folder does
+The current milestone provides a complete local chat path:
 
-### `local_agent/api`
+1. `repowren-chat` reads a prompt and keeps the active conversation in memory.
+2. The client posts validated messages to `POST /v1/chat/stream`.
+3. `ChatService` coordinates the request without depending on Docker details.
+4. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
+   endpoint.
+5. Generated text deltas become small newline-delimited API events.
+6. The terminal client prints each token as it arrives.
 
-`app.py` creates the FastAPI application. `routes.py` defines `/health`, `/status`, and `/v1/chat/stream`. `schemas.py` validates message roles and request limits before anything reaches the model server.
+RepoWren and vLLM remain separate processes. The API does not install Torch,
+load model weights, reserve GPU memory, or depend on Docker libraries. It only
+needs the HTTP URL in `VLLM_BASE_URL`.
 
-### `local_agent/services`
+## Components
 
-`chat.py` coordinates each request and turns generated text into a small newline-delimited event stream:
+### `repowren/api`
 
-- `status` says that RepoWren is waiting for the model server;
-- `token` carries a generated text fragment;
-- `done` marks successful completion;
-- `error` reports a failure without crashing the API process.
+`app.py` creates the FastAPI application and closes the inference HTTP client
+during shutdown. `routes.py` exposes health, model status, and streamed chat.
+`schemas.py` bounds message sizes, message counts, token counts, and temperature
+before requests reach inference.
 
-This layer does not know the details of vLLM's protocol.
+### `repowren/services`
 
-### `local_agent/inference`
+`chat.py` converts inference output into `status`, `token`, `done`, and `error`
+events. This keeps the public API independent of vLLM's Server-Sent Events.
 
-`base.py` defines the small interface used by the rest of the application: model ID, status, readiness check, cleanup, and an asynchronous text stream.
+### `repowren/inference`
 
-`vllm.py` is the only module that knows vLLM's OpenAI-compatible protocol. It:
+`base.py` defines the narrow interface the chat service needs. `vllm.py` is the
+only application module that understands vLLM's OpenAI-compatible protocol.
+Network, readiness, and response-format failures become actionable
+`InferenceError` messages.
 
-1. Calls `GET /health` to check whether the model server is ready.
-2. Sends validated messages to `POST /v1/chat/completions`.
-3. Reads Server-Sent Events and yields only generated text deltas.
-4. Converts network and protocol failures into `InferenceError`.
+### `repowren/cli.py`
 
-Keeping this adapter small makes the rest of RepoWren independent of the inference engine's deployment details.
+The terminal client is a separate HTTP consumer. It does not import the agent
+service or inference implementation, so a future editor interface can use the
+same API without changing the backend.
 
-### `scripts`
+### `compose.yaml`
 
-`setup_vllm_wsl.sh` creates a native Linux virtual environment and installs the selected prebuilt vLLM CUDA wheel. `start_vllm.sh` reads model-serving settings and starts `vllm serve`. `start_api_wsl.sh` is an optional helper that runs the API in the same Linux environment.
-
-Docker users do not need these setup scripts because the container already contains vLLM and its CUDA dependencies.
-
-## One request, step by step
-
-1. A caller posts JSON to `http://127.0.0.1:8000/v1/chat/stream`.
-2. FastAPI validates the JSON structure and token limits.
-3. `ChatService` emits a `status` event if the model server is not already marked ready.
-4. `VLLMClient` checks the `/health` endpoint configured by `VLLM_BASE_URL`.
-5. The adapter sends the messages to vLLM and begins reading its streamed response.
-6. Each vLLM text delta becomes a RepoWren `token` event.
-7. RepoWren emits `done` when the stream finishes.
-8. Network, readiness, or response-format failures become an `error` event.
-
-The API stays responsive because model loading and GPU execution happen in the separate vLLM process.
+Docker Compose runs only vLLM. It grants the container one NVIDIA GPU, maps host
+port `8001` to vLLM port `8000`, and persists model and compilation caches in
+named volumes. Docker Compose commands provide the complete lifecycle interface.
 
 ## Configuration
 
-Process environment variables take precedence over values in `.env`.
+Process variables take precedence over the ignored `.env` file.
 
-| Variable | Meaning |
-| --- | --- |
-| `VLLM_MODEL_ID` | Model name sent with chat-completion requests |
-| `VLLM_BASE_URL` | Base URL of the vLLM server |
-| `VLLM_VERSION` | Release used by the optional native installation helper |
-| `VLLM_TORCH_BACKEND` | CUDA wheel variant used by the installation helper |
-| `VLLM_HOST` / `VLLM_PORT` | Listen address and port used by the startup helper |
-| `VLLM_MAX_MODEL_LEN` | Maximum prompt-plus-output context configured for vLLM |
-| `VLLM_GPU_MEMORY_UTILIZATION` | Fraction of GPU memory vLLM may reserve |
-| `VLLM_DTYPE` | Model data type passed to vLLM |
-| `HF_TOKEN` | Optional Hugging Face token for private or gated models |
+- `VLLM_IMAGE` selects the container image.
+- `VLLM_MODEL_ID` selects the served Hugging Face model.
+- `VLLM_BASE_URL` tells RepoWren where vLLM is reachable.
+- `VLLM_PORT` selects the host-side Docker port.
+- `VLLM_MAX_MODEL_LEN` bounds prompt-plus-output context in vLLM.
+- `VLLM_GPU_MEMORY_UTILIZATION` limits the fraction of GPU memory reserved.
+- `VLLM_DTYPE` selects the model data type.
+- `HF_TOKEN` optionally authenticates gated model downloads.
+- `REPOWREN_API_URL` tells the terminal client where the API is reachable.
 
-Tokens, caches, virtual environments, and common model-weight formats are ignored by Git.
+## Why Docker is the only vLLM installation path
 
-## Why vLLM is separate
+vLLM requires Linux and a tightly matched Torch/CUDA environment. The official
+container packages those dependencies together. RepoWren therefore does not
+maintain a second vLLM Python environment or shell scripts inside the user's
+Ubuntu distribution.
 
-vLLM is a GPU model server with large CUDA and Torch dependencies. Keeping it outside the API process has three benefits:
+Docker Desktop still uses a Linux virtualization backend for GPU-enabled
+containers on Windows. That infrastructure is managed by Docker rather than by
+RepoWren.
 
-1. The API environment remains small and quick to install.
-2. Restarting or upgrading vLLM does not require changing the API code.
-3. A future deployment can move inference to another machine by changing one URL.
+## Testing boundaries
 
-The cost is one extra local service. `/status` exists so callers can distinguish a healthy RepoWren process from a model server that is still loading or unavailable.
+Offline tests use fake inference backends and `httpx.MockTransport`. They test
+validation, readiness states, event ordering, SSE parsing, and terminal output
+without Docker, a GPU, or a model download.
 
-## Testing
+Hardware validation is intentionally separate:
 
-Unit tests use `httpx.MockTransport` and fake inference backends. They verify validation, readiness states, SSE parsing, and the NDJSON event protocol without downloading a model or requiring a GPU:
+1. Start the Compose service.
+2. Wait for vLLM `/health` and `/v1/models`.
+3. Start `repowren-api`.
+4. Check RepoWren `/status`.
+5. Run `repowren-chat` and `benchmarks/inference.py`.
 
-```bash
-python -m pytest -q
-```
+## Next milestone: repository-aware assistant
 
-Hardware validation is separate: start vLLM, confirm its `/health` endpoint, start RepoWren, and run `benchmarks/inference.py`.
+After this milestone is accepted, RepoWren can add repository registration,
+workspace-boundary validation, file listing, safe file reading, and basic text
+search. That work should introduce a small orchestration layer and PostgreSQL
+repository metadata without adding embeddings or code editing yet.
+
+Later milestones can add persistent code chunks and pgvector retrieval,
+approval-controlled patches and tests, then approval-controlled Git operations.
+The terminal client, FastAPI boundary, and inference interface can remain
+unchanged as those capabilities grow.

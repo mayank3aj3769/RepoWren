@@ -3,9 +3,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from local_agent.api.schemas import ChatRequest, StatusResponse
-from local_agent.inference.base import InferenceBackend
-from local_agent.services.chat import ChatService
+from repowren.api.schemas import ChatRequest, StatusResponse
+from repowren.inference.base import InferenceBackend
+from repowren.services.chat import ChatService
 
 
 router = APIRouter()

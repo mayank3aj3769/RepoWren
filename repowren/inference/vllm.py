@@ -7,9 +7,9 @@ from collections.abc import AsyncIterator, Sequence
 
 import httpx
 
-from local_agent.api.schemas import ChatMessage
-from local_agent.config import Settings
-from local_agent.inference.base import InferenceError, InferenceStatus
+from repowren.api.schemas import ChatMessage
+from repowren.config import Settings
+from repowren.inference.base import InferenceError, InferenceStatus
 
 
 class VLLMClient:
