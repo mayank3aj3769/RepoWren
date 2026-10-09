@@ -26,3 +26,50 @@ class StatusResponse(BaseModel):
     api: Literal["ok"] = "ok"
     inference: Literal["not_loaded", "loading", "ready", "error"]
     model: str
+
+
+class RepositoryCreate(BaseModel):
+    """Register a local Git repository that RepoWren may inspect."""
+
+    path: str = Field(min_length=1, max_length=4_096)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class RepositoryResponse(BaseModel):
+    """Public representation of a registered repository."""
+
+    id: int
+    name: str
+    root_path: str
+    is_active: bool
+
+
+class FileMetadataResponse(BaseModel):
+    """Safe metadata returned for a repository file."""
+
+    path: str
+    size_bytes: int
+    modified_ns: int
+    sha256: str
+
+
+class FileContentResponse(BaseModel):
+    """UTF-8 contents of one repository file."""
+
+    path: str
+    content: str
+
+
+class SearchRequest(BaseModel):
+    """Bounded literal source-code search."""
+
+    query: str = Field(min_length=1, max_length=500)
+    max_results: int = Field(default=50, ge=1, le=100)
+
+
+class SearchMatchResponse(BaseModel):
+    """One source line containing the requested text."""
+
+    path: str
+    line: int
+    text: str

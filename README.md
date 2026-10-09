@@ -2,15 +2,17 @@
 
 RepoWren is a lightweight, local-first coding-agent foundation. A terminal
 client talks to a small FastAPI backend, and the backend streams generated text
-from a separate vLLM server running in Docker.
+from a separate vLLM server running in Docker. PostgreSQL stores registered
+repository and file metadata.
 
 ```text
 terminal -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
+                         -> Docker PostgreSQL :5432
 ```
 
-This milestone deliberately stays small. Repository tools, PostgreSQL-backed
-memory, indexing, and code editing will be added incrementally after the local
-chat path is working reliably.
+This milestone adds read-only repository awareness: safe file discovery,
+reading, literal search, and bounded source context. Code editing, command
+execution, embeddings, and Git mutations remain intentionally out of scope.
 
 ## Requirements
 
@@ -40,6 +42,7 @@ VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
 VLLM_BASE_URL=http://127.0.0.1:8001
 VLLM_PORT=8001
 REPOWREN_API_URL=http://127.0.0.1:8000
+DATABASE_URL=postgresql://repowren:repowren@127.0.0.1:5432/repowren
 ```
 
 Secrets, model weights, caches, and virtual environments are excluded from Git.
@@ -79,7 +82,8 @@ docker compose build --pull vllm
 ```
 
 The Compose file reserves one NVIDIA GPU, persists Hugging Face and vLLM
-compile caches, and exposes the container's port `8000` as host port `8001`.
+compile caches, starts PostgreSQL with a health check, and exposes vLLM's
+container port `8000` as host port `8001`.
 
 Check vLLM directly once it finishes loading:
 
@@ -113,7 +117,22 @@ repowren-chat
 ```
 
 The client keeps the current conversation in memory and streams model output as
-it arrives. Type `/exit` or `/quit` to finish.
+it arrives. Register a local Git repository, inspect it, then ask a question:
+
+```text
+/repo add C:\path\to\your-project
+/repo list
+/files
+/search function_name
+/read src/example.py
+How does function_name work?
+```
+
+Once selected, ordinary chat uses bounded source excerpts from that repository.
+Type `/help` for commands or `/exit` to finish. Registration accepts only an
+existing Git repository. RepoWren ignores `.gitignore` entries, secrets such as
+`.env`, binary files, generated directories, model weights, files over 1 MB,
+and paths that escape the repository root.
 
 The HTTP API remains available to other clients:
 
@@ -121,6 +140,12 @@ The HTTP API remains available to other clients:
 - `GET /status` checks vLLM readiness and reports the configured model.
 - `POST /v1/chat/stream` streams newline-delimited `status`, `token`, `done`,
   and `error` events.
+- `POST/GET /v1/repositories` registers or lists repositories.
+- `POST /v1/repositories/{id}/select` selects the active repository.
+- `GET /v1/repositories/{id}/files` lists bounded safe file metadata.
+- `GET /v1/repositories/{id}/file?path=...` reads one safe UTF-8 file.
+- `POST /v1/repositories/{id}/search` performs bounded literal search.
+- `POST /v1/repositories/{id}/chat/stream` injects relevant source excerpts.
 
 ## Benchmark
 
@@ -148,20 +173,22 @@ The probe reports time to first text and total request time. Docker Desktop and
   `VLLM_GPU_MEMORY_UTILIZATION`; do not select a larger model for this GPU.
 - If port `8001` is occupied, change both `VLLM_PORT` and `VLLM_BASE_URL` in
   `.env`.
+- If port `5432` is occupied, change `POSTGRES_PORT` and the port in
+  `DATABASE_URL` together.
 
 ## Project layout
 
 ```text
 RepoWren/
-|-- repowren/             API, terminal client, services, and vLLM adapter
+|-- repowren/             API, repository tools, persistence, and vLLM adapter
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
 |-- docs/architecture.md  architecture and milestone boundaries
 |-- Dockerfile.vllm       text-only compatibility layer over official vLLM
-|-- compose.yaml          Docker vLLM service
+|-- compose.yaml          Docker vLLM and PostgreSQL services
 |-- pyproject.toml        package metadata and dependencies
 `-- .env.example          safe local configuration template
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the request flow and the
-next architectural milestone.
+See [docs/architecture.md](docs/architecture.md) for the request flow, safety
+boundary, and later architectural milestones.

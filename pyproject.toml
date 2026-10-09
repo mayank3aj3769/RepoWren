@@ -11,6 +11,8 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",
     "httpx>=0.27,<1",
+    "pathspec>=0.12,<1",
+    "psycopg[binary]>=3.2,<4",
     "python-dotenv>=1,<2",
     "uvicorn>=0.32,<1",
 ]
@@ -26,6 +28,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["repowren*"]
+
+[tool.setuptools.package-data]
+repowren = ["persistence/migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
