@@ -17,6 +17,12 @@ class FakeInference:
     def __init__(self, status: InferenceStatus = "ready") -> None:
         self.status = status
 
+    async def check_ready(self) -> bool:
+        return self.status == "ready"
+
+    async def close(self) -> None:
+        return None
+
     async def stream_chat(
         self,
         messages: Sequence[ChatMessage],
@@ -69,7 +75,7 @@ def test_chat_announces_lazy_model_loading() -> None:
     assert response.status_code == 200
     assert events[0] == {
         "type": "status",
-        "message": "Loading test/model with AirLLM...",
+        "message": "Waiting for vLLM model server (test/model)...",
     }
     assert events[-1] == {"type": "done"}
 

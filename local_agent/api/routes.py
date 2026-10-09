@@ -18,6 +18,7 @@ def _inference(request: Request) -> InferenceBackend:
 @router.get("/status", response_model=StatusResponse)
 async def status_endpoint(request: Request) -> StatusResponse:
     inference = _inference(request)
+    await inference.check_ready()
     return StatusResponse(inference=inference.status, model=inference.model_id)
 
 

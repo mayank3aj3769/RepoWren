@@ -1,122 +1,138 @@
 # RepoWren
 
-RepoWren is a small, local-first coding agent. This branch uses [AirLLM](https://github.com/lyogavin/airllm) as the inference engine, so model weights are streamed layer by layer instead of being kept entirely in GPU memory.
-
-The current working slice is:
+RepoWren is a small, local-first coding-agent API. A lightweight FastAPI process validates chat requests and forwards them to a separate [vLLM](https://github.com/vllm-project/vllm) model server through its OpenAI-compatible API.
 
 ```text
-API caller -> FastAPI -> AirLLM -> Hugging Face model
+client -> RepoWren API :8000 -> vLLM :8001 -> model on GPU
 ```
 
-There is no separate llama.cpp executable or model server. The API process loads AirLLM lazily when the first chat request arrives.
+Keeping inference in a separate process prevents CUDA and model-serving dependencies from being installed in the API environment. The vLLM server may run locally, in a container, or on another reachable machine.
 
-## GPU setup on Windows
+## Requirements
 
-The tested environment is Python 3.12, an NVIDIA GTX 1650 with 4 GiB VRAM, and an NVIDIA driver that supports CUDA 12.6. Check that the driver can see the GPU first:
+- Python 3.12 or newer for RepoWren.
+- A running vLLM server with a supported GPU environment.
+- Enough disk space for the selected model and the Hugging Face download cache.
 
-```powershell
-nvidia-smi
+## Configure RepoWren
+
+Create the local environment file:
+
+```bash
+cp .env.example .env
 ```
 
-Create the virtual environment in the repository and install the CUDA Torch wheel before installing RepoWren. Installing the normal PyPI Torch wheel can produce a CPU-only environment.
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install "torch==2.14.1+cu126" --index-url https://download.pytorch.org/whl/cu126
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-Verify the GPU and dependencies:
-
-```powershell
-.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-.\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-If you need a different CUDA wheel, choose a compatible Windows build from the [official PyTorch installation list](https://pytorch.org/get-started/previous-versions/). AirLLM itself requires Torch 2.4 or newer.
-
-## Configure the model
-
-Create the ignored local environment file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-The example selects the small public coding model `Qwen/Qwen2.5-Coder-0.5B-Instruct`. Change `AIRLLM_MODEL_ID` to any compatible Hugging Face model when you are ready to try a larger model. The model name is configuration, not code.
-
-For a private or gated repository, set the token only in `.env` or in the process environment:
+The important settings are:
 
 ```dotenv
-HF_TOKEN=hf_your_token_here
+VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+VLLM_BASE_URL=http://127.0.0.1:8001
+LOCAL_AGENT_API_URL=http://127.0.0.1:8000
 ```
 
-Never commit `.env` or model files. `.gitignore` excludes the environment file, Hugging Face cache, AirLLM layer shards, and common model weight formats.
+Set `HF_TOKEN` only when the selected Hugging Face repository requires authentication. `.env`, virtual environments, model caches, and model-weight formats are excluded from Git.
 
-Inspect the resolved configuration without loading anything:
+## Install the API
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\prepare_model.py --show-config
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python -m pip check
+python -m pytest -q
 ```
 
-## Download and prepare model weights
+The API environment intentionally does not install Torch or vLLM.
 
-AirLLM downloads the configured repository from Hugging Face and creates reusable per-layer shards. Run this once before starting the API if you want to prepare the model explicitly:
+## Start vLLM
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\prepare_model.py
+The simplest isolated setup is the official vLLM container. The following command exposes the model server on port `8001` and keeps downloaded weights in the local Hugging Face cache:
+
+```bash
+docker run --rm --gpus all --ipc=host \
+  -p 8001:8000 \
+  -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+  --env HF_TOKEN \
+  --entrypoint /bin/bash \
+  vllm/vllm-openai:latest-cu129 \
+  -lc 'python3 -m pip uninstall -y torchcodec --root-user-action=ignore >/dev/null && exec vllm serve Qwen/Qwen2.5-Coder-0.5B-Instruct --host 0.0.0.0 --port 8000 --max-model-len 2048 --gpu-memory-utilization 0.75 --dtype half --enforce-eager'
 ```
 
-Original files are cached below `models/huggingface`. Split layer files are stored below `models/airllm/<model-name>`. Both locations are ignored by Git. The default keeps original files because they are useful when changing settings; set `AIRLLM_DELETE_ORIGINAL=true` only when disk space is more important than keeping that cache.
+The temporary `torchcodec` removal avoids a CUDA-version mismatch in the current CUDA 12.9 image. RepoWren serves text, so it does not require the optional audio/video decoder. The image itself is not modified.
 
-AirLLM compression is optional. Leave `AIRLLM_COMPRESSION` blank for the tested path. `4bit` and `8bit` compression require additional platform-specific packages and should be enabled only after checking the target machine.
+For a native Linux installation, the included shell helpers install and start the configured CUDA build:
 
-## Run RepoWren
-
-Start the local API:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn local_agent.api.app:app --host 127.0.0.1 --port 8000
+```bash
+bash scripts/setup_vllm_wsl.sh
+bash scripts/start_vllm.sh
 ```
 
-The first chat request loads the model if `prepare_model.py` was not run. Start the API above, then call it directly from your own script, `curl`, Postman, or an editor integration. For a quick PowerShell smoke request:
+The setup helper installs vLLM once in `${VLLM_VENV_DIR:-$HOME/.venvs/repowren-vllm}`. Later starts only require `scripts/start_vllm.sh`. The defaults can be changed in `.env`; verify that the selected vLLM wheel, CUDA backend, GPU, and driver are compatible before changing them.
 
-```powershell
-$body = '{"messages":[{"role":"user","content":"Reply with one short word."}],"max_tokens":4,"temperature":0.0}'
-curl.exe -N -H "Content-Type: application/json" -d $body http://127.0.0.1:8000/v1/chat/stream
+Wait for vLLM to finish loading, then check it directly:
+
+```bash
+curl http://127.0.0.1:8001/health
+curl http://127.0.0.1:8001/v1/models
 ```
 
-There is intentionally no `local-agent.exe` entry point now. If that file still appears in an existing `.venv`, it is a stale artifact from an older installation; recreate the virtual environment or uninstall/reinstall RepoWren after pulling this change.
+## Start RepoWren
 
-## Endpoints and benchmark
+In another terminal with the API environment activated:
 
-- `GET http://127.0.0.1:8000/health` confirms that the API process is alive.
-- `GET http://127.0.0.1:8000/status` reports `not_loaded`, `loading`, `ready`, or `error` and the configured model.
-- `POST http://127.0.0.1:8000/v1/chat/stream` returns newline-delimited status, token, done, or error events.
-
-Run a short GPU smoke benchmark while the API is active:
-
-```powershell
-.\.venv\Scripts\python.exe .\benchmarks\inference.py
+```bash
+python -m uvicorn local_agent.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-Layer streaming uses less VRAM but is slower than keeping the whole model resident. The first request also pays model initialization cost. For the tested GTX 1650, a four-token warm probe completed successfully through the API after AirLLM prepared the model.
+Check both the API process and its connection to vLLM:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/status
+```
+
+Send a streamed chat request:
+
+```bash
+curl -N \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Reply with one short word."}],"max_tokens":16,"temperature":0.0}' \
+  http://127.0.0.1:8000/v1/chat/stream
+```
+
+The response is newline-delimited JSON containing `status`, `token`, `done`, or `error` events.
+
+## API endpoints
+
+- `GET /health` confirms that the RepoWren API process is running.
+- `GET /status` checks vLLM readiness and reports the configured model.
+- `POST /v1/chat/stream` accepts chat messages and streams RepoWren events.
+
+Run the small end-to-end timing probe while both services are active:
+
+```bash
+python benchmarks/inference.py
+```
+
+## Troubleshooting
+
+- `/health` on port `8000` only checks RepoWren. Use `/status` to verify that vLLM is reachable.
+- If the first vLLM start fails during a model download, check free space in the mounted Hugging Face cache and retry after removing any incomplete download.
+- If vLLM reports an out-of-memory error, lower `VLLM_MAX_MODEL_LEN` or `VLLM_GPU_MEMORY_UTILIZATION`, or choose a smaller model.
+- Keep `HF_TOKEN`, model weights, caches, and local environment files out of commits.
 
 ## Project layout
 
 ```text
 RepoWren/
-|-- local_agent/          Python package and API code
-|-- scripts/              model preparation helper
+|-- local_agent/          FastAPI application and vLLM HTTP adapter
+|-- scripts/              optional vLLM and API launch helpers
 |-- tests/                deterministic offline tests
-|-- benchmarks/           API smoke benchmark
-|-- docs/architecture.md  plain-language design explanation
-|-- pyproject.toml        dependencies and package metadata
+|-- benchmarks/           end-to-end timing probe
+|-- docs/architecture.md  plain-language architecture guide
+|-- pyproject.toml        API dependencies and package metadata
 `-- .env.example          safe configuration template
 ```
 
-The old `src/local_agent` wrapper was removed. `local_agent` remains a package because Python needs a package directory for imports; it is now at the repository root so the layout is easier to follow.
-
-For the design explained step by step, read [docs/architecture.md](docs/architecture.md).
+Read [docs/architecture.md](docs/architecture.md) for a step-by-step explanation of the request path.

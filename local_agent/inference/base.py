@@ -1,4 +1,4 @@
-"""Small interface shared by real and fake inference backends."""
+"""Small interface shared by the vLLM client and offline fakes."""
 
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ class InferenceBackend(Protocol):
 
     @property
     def status(self) -> InferenceStatus: ...
+
+    async def check_ready(self) -> bool: ...
+
+    async def close(self) -> None: ...
 
     async def stream_chat(
         self,

@@ -20,7 +20,7 @@ class ChatService:
             if self._inference.status != "ready":
                 yield self._event(
                     "status",
-                    message=f"Loading {self._inference.model_id} with AirLLM...",
+                    message=f"Waiting for vLLM model server ({self._inference.model_id})...",
                 )
             async for text in self._inference.stream_chat(
                 request.messages,

@@ -153,6 +153,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv-vllm/
 env/
 venv/
 ENV/
@@ -216,6 +217,7 @@ tempCodeRunnerFile.py
 !.env.example
 .runtime/
 .tmp-airllm/
+/docs/chat-context.md
 models/
 *.gguf
 *.safetensors
