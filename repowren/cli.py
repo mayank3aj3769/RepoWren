@@ -17,7 +17,7 @@ COMMAND_HELP = """Commands:
   /repo use <id>     Select a registered repository
   /files [query]     List files in the selected repository
   /read <path>       Read a UTF-8 file from the selected repository
-  /search <query>    Search source lines in the selected repository
+  /search <query>    Semantically search indexed source chunks
   /help              Show this help
   /exit              Quit"""
 
@@ -27,7 +27,13 @@ def _stream_reply(
     messages: list[dict[str, str]],
     repository_id: int | None = None,
 ) -> str:
-    """Print one streamed reply and return the complete assistant message."""
+    """Print streamed tokens and return the complete answer for chat history.
+
+    For token events `Hello` and ` world`, the user sees text appear in two
+    steps while `text_parts` becomes `['Hello', ' world']`. Joining that list
+    returns `Hello world`, which is stored as the assistant's history message.
+    """
+    # Once a repository is selected, use the endpoint that adds source context.
     path = (
         f"/v1/repositories/{repository_id}/chat/stream"
         if repository_id is not None
@@ -37,6 +43,8 @@ def _stream_reply(
     with client.stream("POST", path, json={"messages": messages}) as response:
         response.raise_for_status()
         for line in response.iter_lines():
+            # The server sends one small JSON object per line, allowing output
+            # to appear before the model has completed the full response.
             if not line:
                 continue
             event = json.loads(line)
@@ -54,6 +62,7 @@ def _stream_reply(
 
 
 def _require_repository(repository_id: int | None) -> int:
+    """Return the selected ID or explain how the user can select a repository."""
     if repository_id is None:
         raise RuntimeError("Select a repository first with /repo add or /repo use.")
     return repository_id
@@ -64,7 +73,12 @@ def _handle_command(
     command: str,
     active_repository_id: int | None,
 ) -> tuple[bool, int | None]:
-    """Handle one slash command and return its active repository selection."""
+    """Run one slash command and return whether it consumed the input.
+
+    The pair ``(True, 7)`` means the input was a command and repository 7 is
+    now selected. ``(False, 7)`` means it was normal chat text, so `run_chat`
+    should send it to the repository-aware chat endpoint.
+    """
     if command == "/help":
         print(COMMAND_HELP)
         return True, active_repository_id
@@ -76,6 +90,9 @@ def _handle_command(
         if not repositories:
             print("No repositories registered.")
         for repository in repositories:
+            # Example API object:
+            # {"id": 7, "name": "shop", "root_path": "C:/code/shop",
+            #  "is_active": true}
             marker = "*" if repository["is_active"] else " "
             print(
                 f"{marker} {repository['id']}: {repository['name']} "
@@ -86,6 +103,7 @@ def _handle_command(
         return True, active_repository_id
 
     if command.startswith("/repo add "):
+        # Quotes are convenient when a Windows path contains spaces.
         path = command.removeprefix("/repo add ").strip().strip('"')
         if not path:
             raise RuntimeError("Usage: /repo add <path>")
@@ -93,6 +111,8 @@ def _handle_command(
         response.raise_for_status()
         repository = response.json()
         if not repository["is_active"]:
+            # Registering a later repository does not automatically change the
+            # database selection, so select it explicitly for this CLI session.
             select_response = client.post(
                 f"/v1/repositories/{repository['id']}/select"
             )
@@ -118,6 +138,8 @@ def _handle_command(
 
     if command == "/files" or command.startswith("/files "):
         repository_id = _require_repository(active_repository_id)
+        # "/files src" becomes query "src". Plain "/files" becomes an empty
+        # query and asks the API for every safe file.
         query = command.removeprefix("/files").strip()
         response = client.get(
             f"/v1/repositories/{repository_id}/files",
@@ -133,6 +155,8 @@ def _handle_command(
 
     if command.startswith("/read "):
         repository_id = _require_repository(active_repository_id)
+        # Everything after "/read " is a path. Therefore questions must be sent
+        # separately; extra words would accidentally become part of the path.
         path = command.removeprefix("/read ").strip()
         response = client.get(
             f"/v1/repositories/{repository_id}/file",
@@ -152,7 +176,10 @@ def _handle_command(
         response.raise_for_status()
         matches = response.json()
         for match in matches:
-            print(f"{match['path']}:{match['line']}: {match['text']}")
+            print(
+                f"{match['path']}:{match['start_line']}-{match['end_line']} "
+                f"(score {match['score']:.3f})\n{match['text']}"
+            )
         if not matches:
             print("No matches.")
         return True, active_repository_id
@@ -167,7 +194,9 @@ def run_chat(
     *,
     prompts: Iterable[str] | None = None,
 ) -> int:
-    """Run an interactive or supplied-prompt chat session."""
+    """Run the terminal loop until input ends or the user asks to exit."""
+    # Conversation text lives only in this client process. Repository records
+    # live in PostgreSQL and therefore survive client restarts.
     messages: list[dict[str, str]] = []
     active_repository_id: int | None = None
     prompt_iterator = iter(prompts) if prompts is not None else None
@@ -204,6 +233,7 @@ def run_chat(
             if handled:
                 continue
 
+            # Only ordinary prompts enter model history; slash commands do not.
             messages.append({"role": "user", "content": prompt})
             print("RepoWren> ", end="", flush=True)
             try:
@@ -212,13 +242,16 @@ def run_chat(
                 messages.pop()
                 print(f"\nError: {exc}")
                 return 1
+            # Example after one turn:
+            # [{"role": "user", "content": "Explain cart"},
+            #  {"role": "assistant", "content": "The cart..."}]
             messages.append({"role": "assistant", "content": answer})
 
     return 0
 
 
 def main() -> int:
-    """Parse command-line options and start a terminal chat."""
+    """Read CLI options and start the interactive terminal client."""
     settings = Settings.from_environment()
     parser = argparse.ArgumentParser(description="Chat with the local RepoWren API.")
     parser.add_argument(

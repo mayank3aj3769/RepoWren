@@ -1,4 +1,4 @@
-"""Offline API coverage for repository-aware Phase 2 endpoints."""
+"""Offline API coverage for semantic repository endpoints."""
 
 from __future__ import annotations
 
@@ -10,13 +10,18 @@ import httpx
 
 from repowren.api.app import create_app
 from repowren.api.schemas import ChatMessage
-from repowren.repositories.models import FileMetadata, RepositoryRecord
+from repowren.repositories.models import RepositoryChunk, RepositoryRecord, SearchMatch
+
+
+class FakeEmbeddings:
+    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0] for _ in texts]
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self.repositories: list[RepositoryRecord] = []
-        self.files: dict[int, list[FileMetadata]] = {}
+        self.chunks: dict[int, list[RepositoryChunk]] = {}
 
     async def initialize(self) -> None:
         return None
@@ -43,25 +48,32 @@ class MemoryStore:
         )
 
     async def select(self, repository_id: int) -> RepositoryRecord | None:
-        if await self.get(repository_id) is None:
-            return None
-        self.repositories = [
-            RepositoryRecord(
-                id=item.id,
-                name=item.name,
-                root_path=item.root_path,
-                is_active=item.id == repository_id,
-            )
-            for item in self.repositories
-        ]
         return await self.get(repository_id)
 
-    async def replace_files(
+    async def replace_chunks(
         self,
         repository_id: int,
-        files: Sequence[FileMetadata],
+        chunks: Sequence[RepositoryChunk],
     ) -> None:
-        self.files[repository_id] = list(files)
+        self.chunks[repository_id] = list(chunks)
+
+    async def search_chunks(
+        self,
+        repository_id: int,
+        query_embedding: Sequence[float],
+        limit: int,
+    ) -> list[SearchMatch]:
+        del query_embedding
+        return [
+            SearchMatch(
+                path=str(chunk.metadata["path"]),
+                start_line=int(chunk.metadata["start_line"]),
+                end_line=int(chunk.metadata["end_line"]),
+                text=chunk.content,
+                score=0.95,
+            )
+            for chunk in self.chunks[repository_id][:limit]
+        ]
 
 
 class CapturingInference:
@@ -90,13 +102,14 @@ class CapturingInference:
 
 def test_repository_endpoints_and_context_chat(tmp_path) -> None:
     (tmp_path / ".git").mkdir()
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
     (tmp_path / "app.py").write_text(
         "def calculate_total(items):\n    return sum(items)\n",
         encoding="utf-8",
     )
     store = MemoryStore()
     inference = CapturingInference()
-    app = create_app(inference, store)  # type: ignore[arg-type]
+    app = create_app(inference, store, FakeEmbeddings())
 
     async def exercise_api() -> None:
         transport = httpx.ASGITransport(app=app)
@@ -112,12 +125,17 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
             assert registered.json()["is_active"] is True
 
             listed = await client.get("/v1/repositories/1/files")
-            assert [item["path"] for item in listed.json()] == ["app.py"]
+            assert listed.json() == [{"path": "app.py", "size_bytes": 52}]
 
             read = await client.get(
                 "/v1/repositories/1/file", params={"path": "app.py"}
             )
             assert "calculate_total" in read.json()["content"]
+
+            excluded = await client.get(
+                "/v1/repositories/1/file", params={"path": ".env"}
+            )
+            assert excluded.status_code == 422
 
             escaped = await client.get(
                 "/v1/repositories/1/file", params={"path": "../secret"}
@@ -125,9 +143,17 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
             assert escaped.status_code == 422
 
             search = await client.post(
-                "/v1/repositories/1/search", json={"query": "sum"}
+                "/v1/repositories/1/search", json={"query": "compute a total"}
             )
-            assert search.json()[0]["line"] == 2
+            assert search.json() == [
+                {
+                    "path": "app.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "text": "def calculate_total(items):\n    return sum(items)",
+                    "score": 0.95,
+                }
+            ]
 
             chat = await client.post(
                 "/v1/repositories/1/chat/stream",
@@ -144,5 +170,5 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
     asyncio.run(exercise_api())
 
     assert inference.messages[0].role == "system"
-    assert "app.py" in inference.messages[0].content
+    assert "### app.py lines 1-2" in inference.messages[0].content
     assert inference.messages[-1].content == "Explain calculate_total"

@@ -13,6 +13,7 @@ DEFAULT_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_DATABASE_URL = "postgresql://repowren:repowren@127.0.0.1:5432/repowren"
+DEFAULT_EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Existing process variables win over values stored in the local .env file.
@@ -27,10 +28,13 @@ class Settings:
     vllm_base_url: str = DEFAULT_VLLM_BASE_URL
     api_url: str = DEFAULT_API_URL
     database_url: str = DEFAULT_DATABASE_URL
+    embedding_model_id: str = DEFAULT_EMBEDDING_MODEL_ID
 
     @classmethod
     def from_environment(cls) -> "Settings":
-        """Read optional API and model-server overrides."""
+        """Build settings from environment variables, falling back to defaults."""
+        # Remove trailing slashes once so route construction never creates
+        # accidental double slashes such as http://localhost:8001//health.
         return cls(
             model_id=os.getenv("VLLM_MODEL_ID", DEFAULT_MODEL_ID).strip(),
             vllm_base_url=os.getenv("VLLM_BASE_URL", DEFAULT_VLLM_BASE_URL).rstrip("/"),
@@ -39,4 +43,7 @@ class Settings:
                 os.getenv("LOCAL_AGENT_API_URL", DEFAULT_API_URL),
             ).rstrip("/"),
             database_url=os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip(),
+            embedding_model_id=os.getenv(
+                "EMBEDDING_MODEL_ID", DEFAULT_EMBEDDING_MODEL_ID
+            ).strip(),
         )

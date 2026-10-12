@@ -4,6 +4,7 @@ import pytest
 
 from repowren.config import (
     DEFAULT_DATABASE_URL,
+    DEFAULT_EMBEDDING_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_VLLM_BASE_URL,
     Settings,
@@ -20,6 +21,7 @@ def test_settings_use_small_public_qwen_by_default(
         "LOCAL_AGENT_API_URL",
         "REPOWREN_API_URL",
         "DATABASE_URL",
+        "EMBEDDING_MODEL_ID",
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -29,6 +31,7 @@ def test_settings_use_small_public_qwen_by_default(
     assert settings.model_id == DEFAULT_MODEL_ID
     assert settings.vllm_base_url == DEFAULT_VLLM_BASE_URL
     assert settings.database_url == DEFAULT_DATABASE_URL
+    assert settings.embedding_model_id == DEFAULT_EMBEDDING_MODEL_ID
 
 
 def test_settings_read_vllm_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,3 +58,11 @@ def test_settings_read_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings.from_environment()
 
     assert settings.database_url == "postgresql://user:pass@localhost/example"
+
+
+def test_settings_read_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDING_MODEL_ID", "owner/test-embeddings")
+
+    settings = Settings.from_environment()
+
+    assert settings.embedding_model_id == "owner/test-embeddings"
