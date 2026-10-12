@@ -49,8 +49,8 @@ These instructions apply to the entire repository.
   code. Explain behind-the-scenes behavior in simple language.
 - For complicated transformations, include a small concrete object example,
   such as a chunk with its path and line-range metadata.
-- Update `README.md`, `docs/architecture.md`, `docs/repo-guide.md`, and
-  `docs/endpoint-flow-guide.md` when public behavior or architecture changes.
+- Update `README.md` and `docs/architecture.md` when public behavior or
+  architecture changes.
 - Never place tokens, credentials, local paths containing secrets, model
   caches, or `.env` contents in source control or PR text.
 
