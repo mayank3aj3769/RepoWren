@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from repowren.repositories.models import FileMetadata, RepositoryRecord
+from repowren.repositories.models import RepositoryChunk, RepositoryRecord, SearchMatch
 
 
 class RepositoryStoreError(RuntimeError):
@@ -27,8 +27,15 @@ class RepositoryStore(Protocol):
 
     async def select(self, repository_id: int) -> RepositoryRecord | None: ...
 
-    async def replace_files(
+    async def replace_chunks(
         self,
         repository_id: int,
-        files: Sequence[FileMetadata],
+        chunks: Sequence[RepositoryChunk],
     ) -> None: ...
+
+    async def search_chunks(
+        self,
+        repository_id: int,
+        query_embedding: Sequence[float],
+        limit: int,
+    ) -> list[SearchMatch]: ...

@@ -76,8 +76,19 @@ def test_repository_commands_select_and_use_repository_chat(
                     {
                         "path": "app.py",
                         "size_bytes": 42,
-                        "modified_ns": 1,
-                        "sha256": "a" * 64,
+                    }
+                ],
+            )
+        if request.url.path == "/v1/repositories/7/search":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "path": "app.py",
+                        "start_line": 1,
+                        "end_line": 8,
+                        "text": "def calculate_total(items):",
+                        "score": 0.8765,
                     }
                 ],
             )
@@ -98,7 +109,13 @@ def test_repository_commands_select_and_use_repository_chat(
 
     exit_code = run_chat(
         "http://testserver",
-        prompts=["/repo add C:/code/sample", "/files", "Explain app.py", "/exit"],
+        prompts=[
+            "/repo add C:/code/sample",
+            "/files",
+            "/search compute total",
+            "Explain app.py",
+            "/exit",
+        ],
     )
 
     assert exit_code == 0
@@ -106,4 +123,5 @@ def test_repository_commands_select_and_use_repository_chat(
     output = capsys.readouterr().out
     assert "Using repository 7: sample" in output
     assert "app.py (42 bytes)" in output
+    assert "app.py:1-8 (score 0.876)" in output
     assert "RepoWren> Found it" in output

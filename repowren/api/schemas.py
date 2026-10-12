@@ -6,14 +6,23 @@ from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
-    """One message in a conversation."""
+    """One validated message in a conversation.
+
+    Example: ``{'role': 'user', 'content': 'Explain the cart service'}`` passes.
+    An unknown role or empty content is rejected before inference starts.
+    """
 
     role: Literal["system", "user", "assistant"]
     content: str = Field(min_length=1, max_length=12_000)
 
 
 class ChatRequest(BaseModel):
-    """A bounded request sent to the local model."""
+    """A bounded request sent to the local model.
+
+    The defaults request at most 256 new tokens with low randomness. Pydantic
+    rejects an empty message list, more than 32 messages, or values outside the
+    declared ranges and FastAPI returns HTTP 422 automatically.
+    """
 
     messages: list[ChatMessage] = Field(min_length=1, max_length=32)
     max_tokens: int = Field(default=256, ge=1, le=1_024)
@@ -21,7 +30,11 @@ class ChatRequest(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """State of the API and its lazily loaded model."""
+    """State of the API and its lazily loaded model.
+
+    The `Literal` types prevent accidental status spellings outside the small
+    public set understood by clients.
+    """
 
     api: Literal["ok"] = "ok"
     inference: Literal["not_loaded", "loading", "ready", "error"]
@@ -29,14 +42,21 @@ class StatusResponse(BaseModel):
 
 
 class RepositoryCreate(BaseModel):
-    """Register a local Git repository that RepoWren may inspect."""
+    """Register a local Git repository that RepoWren may inspect.
+
+    Example: ``{'path': 'C:\\code\\shop', 'name': 'Shop API'}``. The name is
+    optional; when omitted, the folder name becomes the display name.
+    """
 
     path: str = Field(min_length=1, max_length=4_096)
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RepositoryResponse(BaseModel):
-    """Public representation of a registered repository."""
+    """Public representation of a registered repository.
+
+    This separates the JSON returned to clients from database-specific rows.
+    """
 
     id: int
     name: str
@@ -45,31 +65,39 @@ class RepositoryResponse(BaseModel):
 
 
 class FileMetadataResponse(BaseModel):
-    """Safe metadata returned for a repository file."""
+    """Live path and byte size returned for one safe repository file."""
 
     path: str
     size_bytes: int
-    modified_ns: int
-    sha256: str
 
 
 class FileContentResponse(BaseModel):
-    """UTF-8 contents of one repository file."""
+    """UTF-8 contents of one repository file plus the requested relative path."""
 
     path: str
     content: str
 
 
 class SearchRequest(BaseModel):
-    """Bounded literal source-code search."""
+    """A bounded semantic source-code search.
+
+    Example: ``{'query': 'send_order', 'max_results': 10}``. An empty query or
+    result limit above 100 is rejected before the filesystem is scanned.
+    """
 
     query: str = Field(min_length=1, max_length=500)
     max_results: int = Field(default=50, ge=1, le=100)
 
 
 class SearchMatchResponse(BaseModel):
-    """One source line containing the requested text."""
+    """One semantically similar indexed source chunk.
+
+    ``score`` is cosine similarity: a larger value means the stored chunk points
+    in a more similar direction to the query embedding.
+    """
 
     path: str
-    line: int
+    start_line: int
+    end_line: int
     text: str
+    score: float

@@ -29,14 +29,26 @@ router = APIRouter()
 
 
 def _inference(request: Request) -> InferenceBackend:
+    """Return the shared model client created when the app started."""
     return request.app.state.inference
 
 
 def _store(request: Request) -> RepositoryStore:
+    """Return the shared repository store created when the app started."""
     return request.app.state.repository_store
 
 
+def _repository_service(request: Request) -> RepositoryService:
+    """Return the shared service with the store and embedding model wired in."""
+    return request.app.state.repository_service
+
+
 def _repository_response(record: RepositoryRecord) -> RepositoryResponse:
+    """Convert the internal repository object into a public API response.
+
+    Example: `RepositoryRecord(id=3, ...)` becomes a Pydantic object that
+    FastAPI can validate and serialize to JSON.
+    """
     return RepositoryResponse(
         id=record.id,
         name=record.name,
@@ -49,6 +61,11 @@ async def _repository_or_404(
     store: RepositoryStore,
     repository_id: int,
 ) -> RepositoryRecord:
+    """Load one repository or return a clear HTTP error to the client.
+
+    Missing data and unavailable storage are different problems: an unknown ID
+    becomes 404, while a PostgreSQL failure becomes 503.
+    """
     try:
         repository = await store.get(repository_id)
     except RepositoryStoreError as exc:
@@ -60,6 +77,7 @@ async def _repository_or_404(
 
 @router.get("/status", response_model=StatusResponse)
 async def status_endpoint(request: Request) -> StatusResponse:
+    """Check vLLM readiness without sending a chat request."""
     inference = _inference(request)
     await inference.check_ready()
     return StatusResponse(inference=inference.status, model=inference.model_id)
@@ -67,6 +85,7 @@ async def status_endpoint(request: Request) -> StatusResponse:
 
 @router.post("/v1/chat/stream")
 async def stream_chat(request: Request, body: ChatRequest) -> StreamingResponse:
+    """Stream a normal chat that does not use repository source context."""
     service = ChatService(_inference(request))
     return StreamingResponse(
         service.stream_events(body),
@@ -84,7 +103,12 @@ async def register_repository(
     request: Request,
     body: RepositoryCreate,
 ) -> RepositoryResponse:
-    service = RepositoryService(_store(request))
+    """Validate, register, and scan a local Git repository.
+
+    FastAPI has already converted request JSON into `RepositoryCreate`. This
+    function then delegates filesystem and database rules to `RepositoryService`.
+    """
+    service = _repository_service(request)
     try:
         repository = await service.register(body.path, body.name)
     except RepositoryAccessError as exc:
@@ -96,6 +120,7 @@ async def register_repository(
 
 @router.get("/v1/repositories", response_model=list[RepositoryResponse])
 async def list_repositories(request: Request) -> list[RepositoryResponse]:
+    """Return every registered repository, with the active one first."""
     try:
         repositories = await _store(request).list_repositories()
     except RepositoryStoreError as exc:
@@ -111,6 +136,7 @@ async def select_repository(
     request: Request,
     repository_id: int,
 ) -> RepositoryResponse:
+    """Make one registered repository the active repository."""
     try:
         repository = await _store(request).select(repository_id)
     except RepositoryStoreError as exc:
@@ -129,9 +155,15 @@ async def list_repository_files(
     repository_id: int,
     query: str | None = Query(default=None, max_length=500),
 ) -> list[FileMetadataResponse]:
+    """Scan and return safe files, optionally filtered by path text.
+
+    `FileMetadata` domain objects are converted one-by-one to response objects.
+    Example: `FileMetadata(path='src/cart.py', size_bytes=812)` becomes JSON
+    with those same two fields.
+    """
     store = _store(request)
     repository = await _repository_or_404(store, repository_id)
-    service = RepositoryService(store)
+    service = _repository_service(request)
     try:
         files = await asyncio.to_thread(service.list_files, repository, query=query)
     except RepositoryAccessError as exc:
@@ -140,8 +172,6 @@ async def list_repository_files(
         FileMetadataResponse(
             path=item.path,
             size_bytes=item.size_bytes,
-            modified_ns=item.modified_ns,
-            sha256=item.sha256,
         )
         for item in files
     ]
@@ -156,9 +186,10 @@ async def read_repository_file(
     repository_id: int,
     path: str = Query(min_length=1, max_length=4_096),
 ) -> FileContentResponse:
+    """Return one bounded UTF-8 file from inside the repository root."""
     store = _store(request)
     repository = await _repository_or_404(store, repository_id)
-    service = RepositoryService(store)
+    service = _repository_service(request)
     try:
         content = await asyncio.to_thread(service.read_file, repository, path)
     except RepositoryAccessError as exc:
@@ -175,20 +206,32 @@ async def search_repository(
     repository_id: int,
     body: SearchRequest,
 ) -> list[SearchMatchResponse]:
+    """Return source chunks whose embeddings are closest to the query.
+
+    The API-supplied `max_results` is passed into the service instead of letting
+    callers request an unlimited scan result.
+    """
     store = _store(request)
     repository = await _repository_or_404(store, repository_id)
-    service = RepositoryService(store)
+    service = _repository_service(request)
     try:
-        matches = await asyncio.to_thread(
-            service.search_code,
+        matches = await service.search_code(
             repository,
             body.query,
             max_results=body.max_results,
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RepositoryStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [
-        SearchMatchResponse(path=item.path, line=item.line, text=item.text)
+        SearchMatchResponse(
+            path=item.path,
+            start_line=item.start_line,
+            end_line=item.end_line,
+            text=item.text,
+            score=item.score,
+        )
         for item in matches
     ]
 
@@ -199,8 +242,15 @@ async def stream_repository_chat(
     repository_id: int,
     body: ChatRequest,
 ) -> StreamingResponse:
+    """Add relevant source excerpts before streaming a model response.
+
+    If the original list is ``[user('Explain cart')]``, the enriched list is
+    ``[system('<source excerpts>'), user('Explain cart')]``. Existing user and
+    assistant messages keep their original order after the new system message.
+    """
     store = _store(request)
     repository = await _repository_or_404(store, repository_id)
+    # Context should describe the newest question, not an older chat message.
     user_message = next(
         (message.content for message in reversed(body.messages) if message.role == "user"),
         None,
@@ -208,16 +258,19 @@ async def stream_repository_chat(
     if user_message is None:
         raise HTTPException(status_code=422, detail="A user message is required.")
 
-    repository_service = RepositoryService(store)
+    repository_service = _repository_service(request)
     try:
-        context = await asyncio.to_thread(
-            repository_service.build_context,
+        context = await repository_service.build_context(
             repository,
             user_message,
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RepositoryStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # Keep the user's original conversation unchanged and prepend source context
+    # only to the request sent for this response.
     enriched = body.model_copy(
         update={
             "messages": [ChatMessage(role="system", content=context), *body.messages]

@@ -7,7 +7,11 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class RepositoryRecord:
-    """One local repository registered with RepoWren."""
+    """One local repository registered with RepoWren.
+
+    Example: ``RepositoryRecord(3, 'shop', 'C:\\code\\shop', True)`` means
+    database row 3 is the repository currently used for repository-aware chat.
+    """
 
     id: int
     name: str
@@ -17,18 +21,32 @@ class RepositoryRecord:
 
 @dataclass(frozen=True, slots=True)
 class FileMetadata:
-    """Searchable metadata for one safe repository file."""
+    """The two facts shown by the live ``/files`` endpoint."""
 
     path: str
     size_bytes: int
-    modified_ns: int
-    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryChunk:
+    """One small source-code block ready to store in pgvector.
+
+    For example, lines 1-20 of ``src/cart.py`` become one object. ``metadata``
+    holds the path and line range that PostgreSQL stores as JSONB, while
+    ``embedding`` is the 384-number meaning vector produced for ``content``.
+    """
+
+    content: str
+    metadata: dict[str, str | int]
+    embedding: list[float]
 
 
 @dataclass(frozen=True, slots=True)
 class SearchMatch:
-    """One matching source line."""
+    """One semantically similar chunk returned by PostgreSQL."""
 
     path: str
-    line: int
+    start_line: int
+    end_line: int
     text: str
+    score: float
