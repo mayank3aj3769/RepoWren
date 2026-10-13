@@ -6,6 +6,7 @@ __pycache__/
 # C extensions
 *.so
 
+node_modules/
 .vscode/
 # Distribution / packaging
 .Python
@@ -217,6 +218,8 @@ tempCodeRunnerFile.py
 .env.*
 !.env.example
 .runtime/
+node_modules/
+.next/
 /docs/chat-context.md
 chat-context.local.md
 models/

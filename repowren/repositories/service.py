@@ -29,6 +29,7 @@ MAX_READ_BYTES = 200_000
 MAX_LIST_RESULTS = 1_000
 MAX_SEARCH_RESULTS = 50
 MAX_CONTEXT_CHARACTERS = 9_000
+MAX_CONTEXT_MATCH_CHARACTERS = 2_400
 CHUNK_LINES = 20
 CONTEXT_RESULTS = 5
 SEARCH_CANDIDATE_LIMIT = 20
@@ -333,11 +334,24 @@ class RepositoryService:
             user_request,
             max_results=CONTEXT_RESULTS,
         )
-        excerpts = [
-            f"### {match.path} lines {match.start_line}-{match.end_line}\n{match.text}"
-            for match in matches
-        ]
-        context = "\n\n".join(excerpts)[:MAX_CONTEXT_CHARACTERS]
+        excerpts: list[str] = []
+        remaining = MAX_CONTEXT_CHARACTERS
+        for match in matches:
+            excerpt = f"### {match.path} lines {match.start_line}-{match.end_line}\n{match.text}"
+            if len(excerpt) > MAX_CONTEXT_MATCH_CHARACTERS:
+                excerpt = (
+                    excerpt[:MAX_CONTEXT_MATCH_CHARACTERS].rstrip()
+                    + "\n[chunk truncated]"
+                )
+            if len(excerpt) > remaining:
+                excerpt = excerpt[:remaining].rstrip() + "\n[context truncated]"
+            if not excerpt:
+                break
+            excerpts.append(excerpt)
+            remaining -= len(excerpt) + 2
+            if remaining <= 0:
+                break
+        context = "\n\n".join(excerpts)
         return (
             f"You are answering a question about the registered repository "
             f"'{repository.name}'. Use the hybrid-ranked source chunks below. Cite file "
