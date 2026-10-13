@@ -75,3 +75,43 @@ def test_status_is_not_ready_when_vllm_health_check_fails() -> None:
             await client.close()
 
     assert asyncio.run(check()) == (False, "loading")
+
+
+def test_stream_chat_retries_with_short_context_after_context_limit() -> None:
+    async def collect() -> tuple[list[str], dict]:
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200)
+            payload = json.loads(request.read())
+            requests.append(payload)
+            if len(requests) == 1:
+                return httpx.Response(400, text="maximum context length exceeded")
+            return httpx.Response(
+                200,
+                text='data: {"choices":[{"delta":{"content":"fallback"}}]}\n\n'
+                "data: [DONE]\n\n",
+            )
+
+        client = VLLMClient(_settings(), transport=httpx.MockTransport(handler))
+        try:
+            tokens = [
+                token
+                async for token in client.stream_chat(
+                    [
+                        ChatMessage(role="system", content="source " * 1_500),
+                        ChatMessage(role="user", content="Explain this"),
+                    ],
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+            ]
+            return tokens, requests[1]
+        finally:
+            await client.close()
+
+    tokens, fallback = asyncio.run(collect())
+    assert tokens == ["fallback"]
+    assert fallback["max_tokens"] == 128
+    assert len(fallback["messages"][0]["content"]) <= 3_500

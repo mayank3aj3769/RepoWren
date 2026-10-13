@@ -378,6 +378,40 @@ def test_repository_chat_context_uses_only_five_hybrid_results(tmp_path) -> None
     assert "src/file_5.py" not in context
 
 
+def test_repository_chat_context_is_bounded_before_chat_validation(tmp_path) -> None:
+    repository = RepositoryRecord(
+        id=4,
+        name="large",
+        root_path=str(tmp_path),
+        is_active=True,
+    )
+    store = MemoryStore()
+    store.repositories.append(repository)
+    store.chunks[repository.id] = [
+        RepositoryChunk(
+            content="x" * 5_000,
+            metadata={
+                "path": f"src/file_{index}.py",
+                "start_line": 1,
+                "end_line": 20,
+            },
+            embedding=[1.0, 0.0, 0.0],
+        )
+        for index in range(5)
+    ]
+    service = RepositoryService(
+        store,
+        FakeEmbeddings(),
+        FakeLexicalIndex(),
+        FakeQueryInference(),
+    )
+
+    context = asyncio.run(service.build_context(repository, "explain"))
+
+    assert len(context) < 12_000
+    assert "[chunk truncated]" in context
+
+
 def test_search_plan_parser_validates_deduplicates_and_limits_model_json() -> None:
     plan = parse_search_plan(
         """```json

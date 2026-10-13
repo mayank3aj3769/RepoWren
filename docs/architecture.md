@@ -9,7 +9,9 @@ Elasticsearch stores the same safe chunk text and location metadata for BM25.
 ```mermaid
 flowchart TD
     U[User] --> C[Terminal client]
+    U --> W[Next.js web UI]
     C --> A[FastAPI backend]
+    W --> A
     A --> S[Chat service]
     A --> R[Repository service]
     R --> F[Local Git repository]
@@ -27,6 +29,7 @@ flowchart TD
 The current milestone provides a repository-aware local chat path:
 
 1. `repowren-chat` reads a prompt and keeps the active conversation in memory.
+   The Next.js UI offers the same flow in a browser.
 2. Repository commands register, select, list, read, and search local Git roots.
 3. Registration splits safe text into 20-line blocks, embeds them on CPU, and
    fully replaces that repository's chunk rows.
@@ -118,6 +121,15 @@ The terminal client is a separate HTTP consumer. It does not import the agent
 service or inference implementation, so a future editor interface can use the
 same API without changing the backend.
 
+### `web`
+
+The local Next.js application mirrors the terminal client. It lists and selects
+registered repositories, streams repository-aware chat, displays the semantic
+and exact-text search plan beside RRF-ranked results, and browses safe files.
+Its server rewrites `/api/repowren/*` to the configured local FastAPI URL, so no
+browser CORS policy or duplicate backend routes are required. Conversation
+history remains browser memory only, matching the terminal's local session.
+
 ### `compose.yaml`
 
 Docker Compose runs vLLM, the pgvector PostgreSQL image, and a single-node
@@ -140,6 +152,8 @@ Process variables take precedence over the ignored `.env` file.
 - `VLLM_BASE_URL` tells RepoWren where vLLM is reachable.
 - `VLLM_PORT` selects the host-side Docker port.
 - `VLLM_MAX_MODEL_LEN` bounds prompt-plus-output context in vLLM.
+  The Compose default is 4,096 tokens; a context-window rejection triggers one
+  adapter retry with shortened source context and a 128-token completion cap.
 - `VLLM_GPU_MEMORY_UTILIZATION` limits the fraction of GPU memory reserved.
 - `VLLM_DTYPE` selects the model data type.
 - `HF_TOKEN` optionally authenticates gated model downloads.

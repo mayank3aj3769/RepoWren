@@ -1,16 +1,16 @@
 # RepoWren
 
 RepoWren is a lightweight, local-first coding-agent foundation. A terminal
-client talks to a small FastAPI backend, and the backend streams generated text
-from a separate vLLM server running in Docker. PostgreSQL with pgvector stores
+client and a Next.js web UI talk to a small FastAPI backend, and the backend
+streams generated text from a separate vLLM server running in Docker. PostgreSQL with pgvector stores
 registered repositories, source chunks, metadata, and embeddings. Elasticsearch
 stores a second, text-only copy of those chunks for exact words and identifiers.
 
 ```text
-terminal -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
-                         -> CPU Sentence Transformers
-                         -> Docker PostgreSQL + pgvector :5432 (semantic search)
-                         -> Docker Elasticsearch :9200 (lexical search)
+terminal / Next.js :3000 -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
+                                                -> CPU Sentence Transformers
+                                                -> Docker PostgreSQL + pgvector :5432
+                                                -> Docker Elasticsearch :9200
 ```
 
 This milestone adds read-only repository awareness: safe file discovery,
@@ -22,6 +22,7 @@ execution, and Git mutations remain intentionally out of scope.
 - Windows with Docker Desktop running Linux containers.
 - Docker Desktop GPU support enabled with an NVIDIA driver and WSL 2 backend.
 - Python 3.12 or newer for the RepoWren API and terminal client.
+- Node.js 20.9 or newer for the Next.js web UI.
 - Enough storage for the vLLM image and the selected Hugging Face model.
 
 The default model is `Qwen/Qwen2.5-Coder-0.5B-Instruct`. It is intentionally
@@ -156,10 +157,30 @@ are never compared. The terminal labels the aggregate hybrid score, and
 repository chat sends the best five hybrid chunks to vLLM. If vLLM is starting,
 temporarily unavailable, or emits malformed planner JSON, search safely falls
 back to the original user query instead of returning a planner-related 503.
+Compose starts vLLM with a 4,096-token context window by default. If a prompt
+still exceeds the model limit, the adapter retries once with bounded source
+context and a shorter completion instead of failing the chat request outright.
 Type `/help` for commands or `/exit` to finish. Registration accepts only an
 existing Git repository. RepoWren ignores `.gitignore` entries, secrets such as
 `.env`, binary files, generated directories, model weights, files over 1 MB,
 and paths that escape the repository root.
+
+## Use the web UI
+
+The local Next.js application mirrors the terminal workflow with repository
+registration and selection, streamed chat, visible hybrid-search query plans,
+RRF-ranked search results, and safe file browsing. Install and start it after
+the RepoWren API is running:
+
+```text
+cd web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:3000`. Next.js proxies `/api/repowren/*` to
+`http://127.0.0.1:8000`, so the browser does not need cross-origin access. Set
+`REPOWREN_API_URL` before starting Next.js if the API uses another address.
 
 The HTTP API remains available to other clients:
 
@@ -220,6 +241,7 @@ The probe reports time to first text and total request time. Docker Desktop and
 ```text
 RepoWren/
 |-- repowren/             API, repository tools, search adapters, and vLLM adapter
+|-- web/                  Next.js repository chat, search, and file browser
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
 |-- docs/architecture.md  architecture and milestone boundaries

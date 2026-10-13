@@ -64,7 +64,7 @@ services:
       - --port
       - "8000"
       - --max-model-len
-      - "${VLLM_MAX_MODEL_LEN:-2048}"
+      - "${VLLM_MAX_MODEL_LEN:-4096}"
       - --gpu-memory-utilization
       - "${VLLM_GPU_MEMORY_UTILIZATION:-0.75}"
       - --dtype
