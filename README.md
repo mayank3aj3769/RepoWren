@@ -3,12 +3,14 @@
 RepoWren is a lightweight, local-first coding-agent foundation. A terminal
 client talks to a small FastAPI backend, and the backend streams generated text
 from a separate vLLM server running in Docker. PostgreSQL with pgvector stores
-registered repositories, source chunks, metadata, and embeddings.
+registered repositories, source chunks, metadata, and embeddings. Elasticsearch
+stores a second, text-only copy of those chunks for exact words and identifiers.
 
 ```text
 terminal -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
                          -> CPU Sentence Transformers
-                         -> Docker PostgreSQL + pgvector :5432
+                         -> Docker PostgreSQL + pgvector :5432 (semantic search)
+                         -> Docker Elasticsearch :9200 (lexical search)
 ```
 
 This milestone adds read-only repository awareness: safe file discovery,
@@ -45,6 +47,9 @@ VLLM_PORT=8001
 REPOWREN_API_URL=http://127.0.0.1:8000
 DATABASE_URL=postgresql://repowren:repowren@127.0.0.1:5432/repowren
 EMBEDDING_MODEL_ID=sentence-transformers/all-MiniLM-L6-v2
+ELASTICSEARCH_URL=http://127.0.0.1:9200
+ELASTICSEARCH_INDEX=repowren-chunks
+ELASTICSEARCH_PORT=9200
 ```
 
 Secrets, model weights, caches, and virtual environments are excluded from Git.
@@ -85,8 +90,10 @@ docker compose build --pull vllm
 ```
 
 The Compose file reserves one NVIDIA GPU, persists Hugging Face and vLLM
-compile caches, starts the pgvector-enabled PostgreSQL image with a health
-check, and exposes vLLM's container port `8000` as host port `8001`.
+compile caches, starts PostgreSQL with pgvector, and starts a single-node
+Elasticsearch service with a 512 MB heap. PostgreSQL and Elasticsearch both
+have health checks and named data volumes. Elasticsearch security is disabled
+only for this local development setup.
 
 Check vLLM directly once it finishes loading:
 
@@ -131,10 +138,24 @@ it arrives. Register a local Git repository, inspect it, then ask a question:
 How does function_name work?
 ```
 
-Registering reads allowed UTF-8 files, splits them into fixed 20-line chunks,
-creates CPU embeddings, and replaces that repository's old chunk rows. Register
-the same path again whenever you want a simple full re-index. Once selected,
-ordinary chat retrieves the five closest chunks and sends them to vLLM.
+Registering reads allowed UTF-8 files once, splits them into fixed 20-line
+chunks, creates CPU embeddings, and replaces that repository's PostgreSQL rows.
+It then replaces the matching text-only Elasticsearch documents. PostgreSQL is
+written first; if Elasticsearch fails, the API reports the failure instead of
+silently using only semantic results. Register the same path again to rebuild
+both snapshots and repair either index.
+
+Search first asks the local vLLM model to turn the user's request into one
+semantic query and up to eight short exact-text strings such as identifiers,
+error text, or configuration keys. PostgreSQL embeds the semantic query and
+finds conceptually similar code with exact pgvector cosine search, while
+Elasticsearch searches the exact-text strings with boosted phrase matches and
+BM25. RepoWren asks each backend for 20 candidates concurrently and uses
+Reciprocal Rank Fusion (RRF) to combine their ranks. Raw cosine and BM25 scores
+are never compared. The terminal labels the aggregate hybrid score, and
+repository chat sends the best five hybrid chunks to vLLM. If vLLM is starting,
+temporarily unavailable, or emits malformed planner JSON, search safely falls
+back to the original user query instead of returning a planner-related 503.
 Type `/help` for commands or `/exit` to finish. Registration accepts only an
 existing Git repository. RepoWren ignores `.gitignore` entries, secrets such as
 `.env`, binary files, generated directories, model weights, files over 1 MB,
@@ -150,8 +171,9 @@ The HTTP API remains available to other clients:
 - `POST /v1/repositories/{id}/select` selects the active repository.
 - `GET /v1/repositories/{id}/files` lists live safe paths and byte sizes.
 - `GET /v1/repositories/{id}/file?path=...` reads one safe UTF-8 file.
-- `POST /v1/repositories/{id}/search` returns semantic chunks with path, line
-  range, text, and cosine-similarity score.
+- `POST /v1/repositories/{id}/search` returns the semantic and exact-text query
+  plan plus hybrid-ranked chunks with path, line range, text, and combined RRF
+  score. The terminal prints that plan before the aggregate results.
 - `POST /v1/repositories/{id}/chat/stream` injects the five closest chunks.
 
 ## Benchmark
@@ -182,6 +204,11 @@ The probe reports time to first text and total request time. Docker Desktop and
   `.env`.
 - If port `5432` is occupied, change `POSTGRES_PORT` and the port in
   `DATABASE_URL` together.
+- If port `9200` is occupied, change both `ELASTICSEARCH_PORT` and the port in
+  `ELASTICSEARCH_URL`.
+- If repository registration reports an Elasticsearch failure, check
+  `docker compose logs elasticsearch`, then register the repository again to
+  rebuild both complete snapshots.
 - If startup says the `vector` extension is unavailable, recreate only the
   PostgreSQL container using the current Compose file. Do not remove the named
   volume unless you intentionally want to erase registered repositories.
@@ -192,7 +219,7 @@ The probe reports time to first text and total request time. Docker Desktop and
 
 ```text
 RepoWren/
-|-- repowren/             API, repository tools, persistence, and vLLM adapter
+|-- repowren/             API, repository tools, search adapters, and vLLM adapter
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
 |-- docs/architecture.md  architecture and milestone boundaries

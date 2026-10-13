@@ -1,9 +1,10 @@
 # RepoWren architecture
 
-RepoWren is a modular monolith with two external Docker services. The Python
+RepoWren is a modular monolith with three external Docker services. The Python
 application owns user interaction, repository safety, CPU embeddings, and
 orchestration; vLLM owns chat-model loading and GPU execution, while PostgreSQL
 with pgvector stores repository chunks and their JSON metadata and vectors.
+Elasticsearch stores the same safe chunk text and location metadata for BM25.
 
 ```mermaid
 flowchart TD
@@ -14,6 +15,7 @@ flowchart TD
     R --> F[Local Git repository]
     R --> E[Sentence Transformers on CPU]
     R --> P[(PostgreSQL)]
+    R --> X[(Elasticsearch)]
     S --> I[vLLM HTTP adapter]
     I --> V[vLLM Docker container]
     V --> G[NVIDIA GPU]
@@ -28,13 +30,18 @@ The current milestone provides a repository-aware local chat path:
 2. Repository commands register, select, list, read, and search local Git roots.
 3. Registration splits safe text into 20-line blocks, embeds them on CPU, and
    fully replaces that repository's chunk rows.
-4. Search embeds the question and asks pgvector for exact cosine-nearest chunks.
-5. Repository-aware chat prepends the five closest chunks to validated messages.
-6. `ChatService` coordinates the request without depending on Docker details.
-7. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
+4. Search asks vLLM for one semantic query and up to eight exact-text strings,
+   embeds the semantic query once, then asks pgvector for 20 semantic candidates
+   and Elasticsearch for 20 lexical candidates concurrently.
+5. A small Reciprocal Rank Fusion function combines the two ranked lists by a
+   deterministic chunk key and returns the requested number of results.
+6. Repository-aware chat prepends the five highest-ranked hybrid chunks to
+   validated messages.
+7. `ChatService` coordinates the request without depending on Docker details.
+8. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
    endpoint.
-8. Generated text deltas become small newline-delimited API events.
-9. The terminal client prints each token as it arrives.
+9. Generated text deltas become small newline-delimited API events.
+10. The terminal client prints each token as it arrives.
 
 RepoWren and vLLM remain separate processes. The API loads only the small CPU
 embedding model; it does not install vLLM, load the chat model, reserve GPU
@@ -56,7 +63,19 @@ messages, paths, searches, result counts, token counts, and temperature.
 rejects traversal and symlink escape, respects root `.gitignore`, skips secrets,
 binary/generated/model files, and bounds file sizes and result counts. It uses
 fixed 20-line chunks so the first implementation is easy to inspect. Repeating
-registration performs a complete re-index rather than incremental hashing.
+registration performs a complete rebuild rather than incremental hashing. The
+same in-memory safe chunks feed PostgreSQL first and Elasticsearch second.
+
+The planner uses the existing vLLM chat adapter with temperature zero and a
+small JSON-only prompt. Its output is bounded and validated; malformed JSON
+or an unavailable planner falls back to using the original query for both
+searches. Search does not compare incompatible cosine and BM25 scores. Each candidate at
+one-based rank `r` receives `1 / (60 + r)`, and a chunk present in both lists
+receives both contributions. `chunk_key` values such as
+`7:src/pricing.py:1:20` identify the same logical chunk across both stores. The
+pure RRF function uses stable first-seen ordering only to break exact ties.
+The explicit search API includes the validated query plan beside the matches,
+and the terminal prints both backend query inputs before the aggregate ranking.
 
 ### `repowren/embeddings.py`
 
@@ -70,6 +89,16 @@ specific ML library. `SentenceTransformerEmbeddings` lazy-loads
 narrow store interface. Chunk metadata is JSONB and vectors use `VECTOR(384)`.
 Search uses exact cosine distance (`<=>`) with no HNSW or IVFFlat index. Packaged
 SQL migrations run once and are recorded in `schema_migrations`.
+
+### `repowren/lexical.py`
+
+The narrow `LexicalSearchIndex` protocol contains only initialize, replace,
+search, and close operations so offline tests can inject a fake. The production
+`ElasticsearchLexicalSearchIndex` uses the official asynchronous client. It
+creates or validates one mapping, deletes one repository's old documents,
+indexes replacements in bounded bulk batches, refreshes once, and runs boosted
+`match_phrase` clauses plus a broad BM25 `match`, all under a repository filter.
+It never indexes or stores vectors.
 
 ### `repowren/services`
 
@@ -91,10 +120,12 @@ same API without changing the backend.
 
 ### `compose.yaml`
 
-Docker Compose runs vLLM and the pgvector PostgreSQL image. It grants vLLM one
+Docker Compose runs vLLM, the pgvector PostgreSQL image, and a single-node
+Elasticsearch image. It grants vLLM one
 NVIDIA GPU, maps host port `8001` to vLLM port `8000`, and persists model,
-compilation, and database
-data in named volumes. Docker Compose commands provide the lifecycle interface.
+compilation, and database data in named volumes. Elasticsearch uses its own
+named volume and a small explicit development heap. Docker Compose commands
+provide the lifecycle interface.
 `Dockerfile.vllm` derives from the pinned official CUDA 12.9 image and removes
 the optional TorchCodec multimedia decoder. RepoWren serves text, and the
 current TorchCodec binary is linked against CUDA 13, so retaining it prevents
@@ -115,6 +146,9 @@ Process variables take precedence over the ignored `.env` file.
 - `REPOWREN_API_URL` tells the terminal client where the API is reachable.
 - `DATABASE_URL` tells the API where PostgreSQL is reachable.
 - `EMBEDDING_MODEL_ID` selects the CPU Sentence Transformers model.
+- `ELASTICSEARCH_URL` tells the API where Elasticsearch is reachable.
+- `ELASTICSEARCH_INDEX` selects the text-only source-chunk index.
+- `ELASTICSEARCH_PORT` selects Elasticsearch's host-side Docker port.
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `POSTGRES_PORT`
   configure the Compose database service.
 
@@ -131,24 +165,28 @@ RepoWren.
 
 ## Testing boundaries
 
-Offline tests use fake inference and embedding backends, an in-memory repository
-store, and `httpx.MockTransport`. They test repository boundaries, ignored files, context
-construction, validation, event ordering, and terminal output without Docker,
-a GPU, a database, or a model download.
+Offline tests use fake inference, embedding, storage, and lexical-search
+backends. They test repository boundaries, ignored files, LLM plan parsing,
+shared chunk identity, RRF ordering, context construction, Elasticsearch
+request translation, validation, event ordering, and terminal output without
+Docker, a GPU, a database, or a model download.
 
 Hardware validation is intentionally separate:
 
-1. Start the Compose service.
-2. Wait for vLLM `/health` and `/v1/models`.
-3. Start `repowren-api`.
-4. Check RepoWren `/status`.
+1. Start PostgreSQL and Elasticsearch and wait for their health checks.
+2. Verify one real pgvector query, BM25 query, and application-side RRF merge.
+3. Start vLLM when validating repository-aware generation.
+4. Start `repowren-api` and check `/health` and `/status`.
 5. Run `repowren-chat` and `benchmarks/inference.py`.
 
 ## Safety boundary and next milestone
 
 Phase 2 is read-only. Repository tools cannot modify source, execute commands,
-or perform Git operations. PostgreSQL contains regenerable copies of safe source
-chunks so it can perform semantic retrieval. Later milestones can add better
+or perform Git operations. PostgreSQL and Elasticsearch contain regenerable
+copies of safe source chunks for semantic and lexical retrieval. They cannot
+share a transaction: PostgreSQL is replaced first, Elasticsearch second, and a
+lexical failure is reported clearly. Re-registering performs the simple repair.
+Later milestones can add better
 chunking and vector indexes, approval-controlled patches and tests, then
 approval-controlled Git operations. The terminal client, FastAPI boundary, and
 inference interface can remain unchanged as those capabilities grow.

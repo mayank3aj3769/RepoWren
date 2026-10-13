@@ -5,6 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def build_chunk_key(
+    repository_id: int,
+    path: str,
+    start_line: int,
+    end_line: int,
+) -> str:
+    """Return the shared identity for one PostgreSQL/Elasticsearch chunk.
+
+    For example, repository 7 and ``src/pricing.py`` lines 1-20 become
+    ``7:src/pricing.py:1:20``. The existing PostgreSQL metadata already holds
+    these values, so a separate database column is unnecessary.
+    """
+    return f"{repository_id}:{path}:{start_line}:{end_line}"
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryRecord:
     """One local repository registered with RepoWren.
@@ -43,8 +58,9 @@ class RepositoryChunk:
 
 @dataclass(frozen=True, slots=True)
 class SearchMatch:
-    """One semantically similar chunk returned by PostgreSQL."""
+    """One ranked chunk returned by a repository search backend."""
 
+    chunk_key: str
     path: str
     start_line: int
     end_line: int

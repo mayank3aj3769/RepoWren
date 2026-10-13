@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Iterable
 
 import httpx
@@ -17,7 +18,7 @@ COMMAND_HELP = """Commands:
   /repo use <id>     Select a registered repository
   /files [query]     List files in the selected repository
   /read <path>       Read a UTF-8 file from the selected repository
-  /search <query>    Semantically search indexed source chunks
+  /search <query>    Search indexed source chunks by meaning and exact words
   /help              Show this help
   /exit              Quit"""
 
@@ -174,11 +175,19 @@ def _handle_command(
             json={"query": query},
         )
         response.raise_for_status()
-        matches = response.json()
+        search = response.json()
+        plan = search["query_plan"]
+        print(f"Embedding query: {plan['embedding_query']}")
+        print("Exact-text queries:")
+        for query in plan["lexical_queries"]:
+            print(f"  - {query}")
+        matches = search["matches"]
+        if matches:
+            print("Hybrid results (semantic + exact-text ranks):")
         for match in matches:
             print(
                 f"{match['path']}:{match['start_line']}-{match['end_line']} "
-                f"(score {match['score']:.3f})\n{match['text']}"
+                f"(hybrid score {match['score']:.3f})\n{match['text']}"
             )
         if not matches:
             print("No matches.")
@@ -195,6 +204,11 @@ def run_chat(
     prompts: Iterable[str] | None = None,
 ) -> int:
     """Run the terminal loop until input ends or the user asks to exit."""
+    # Redirected Windows consoles can use a legacy code page. Keep an unusual
+    # source-code glyph from aborting the complete search-results display.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
     # Conversation text lives only in this client process. Repository records
     # live in PostgreSQL and therefore survive client restarts.
     messages: list[dict[str, str]] = []

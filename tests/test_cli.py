@@ -82,15 +82,21 @@ def test_repository_commands_select_and_use_repository_chat(
         if request.url.path == "/v1/repositories/7/search":
             return httpx.Response(
                 200,
-                json=[
-                    {
-                        "path": "app.py",
-                        "start_line": 1,
-                        "end_line": 8,
-                        "text": "def calculate_total(items):",
-                        "score": 0.8765,
-                    }
-                ],
+                json={
+                    "query_plan": {
+                        "embedding_query": "calculate an item total",
+                        "lexical_queries": ["calculate_total", "sum(items)"],
+                    },
+                    "matches": [
+                        {
+                            "path": "app.py",
+                            "start_line": 1,
+                            "end_line": 8,
+                            "text": "def calculate_total(items):",
+                            "score": 0.8765,
+                        }
+                    ],
+                },
             )
         if request.url.path == "/v1/repositories/7/chat/stream":
             return httpx.Response(
@@ -123,5 +129,9 @@ def test_repository_commands_select_and_use_repository_chat(
     output = capsys.readouterr().out
     assert "Using repository 7: sample" in output
     assert "app.py (42 bytes)" in output
-    assert "app.py:1-8 (score 0.876)" in output
+    assert "Embedding query: calculate an item total" in output
+    assert "  - calculate_total" in output
+    assert "  - sum(items)" in output
+    assert "Hybrid results (semantic + exact-text ranks):" in output
+    assert "app.py:1-8 (hybrid score 0.876)" in output
     assert "RepoWren> Found it" in output

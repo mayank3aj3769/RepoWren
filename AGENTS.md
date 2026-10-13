@@ -22,10 +22,19 @@ These instructions apply to the entire repository.
 - Split allowed UTF-8 files into fixed, non-overlapping 20-line chunks.
 - Store chunk text, JSONB metadata (`path`, `start_line`, `end_line`), and the
   embedding in PostgreSQL `VECTOR(384)` columns.
+- Store the same safe chunk text and location metadata, but never embeddings,
+  in Elasticsearch for BM25 lexical search.
 - Re-registering a repository performs a complete chunk rebuild. Keep this
   behavior simple until incremental indexing is explicitly requested.
-- Perform exact pgvector cosine search and use the five closest chunks for chat
-  context. Do not reintroduce keyword extraction or literal-search loops.
+- Retrieve 20 exact pgvector cosine candidates and 20 Elasticsearch BM25
+  candidates, merge them with application-side Reciprocal Rank Fusion, and use
+  the five highest-ranked hybrid chunks for chat context.
+- Before retrieval, use vLLM to produce one semantic query and a bounded list of
+  exact-text queries. Validate the JSON response and fall back to the original
+  user query when the response is malformed.
+- Keep the RRF implementation small and keyed by the deterministic chunk key
+  `repository_id:path:start_line:end_line`. Do not compare raw cosine and BM25
+  scores or add another ranking library.
 
 ## Repository safety
 

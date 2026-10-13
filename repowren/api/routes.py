@@ -15,10 +15,13 @@ from repowren.api.schemas import (
     RepositoryCreate,
     RepositoryResponse,
     SearchMatchResponse,
+    SearchQueryPlanResponse,
     SearchRequest,
+    SearchResponse,
     StatusResponse,
 )
-from repowren.inference.base import InferenceBackend
+from repowren.inference.base import InferenceBackend, InferenceError
+from repowren.lexical import LexicalSearchError
 from repowren.repositories.models import RepositoryRecord
 from repowren.repositories.service import RepositoryAccessError, RepositoryService
 from repowren.repositories.store import RepositoryStore, RepositoryStoreError
@@ -113,7 +116,7 @@ async def register_repository(
         repository = await service.register(body.path, body.name)
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RepositoryStoreError as exc:
+    except (RepositoryStoreError, LexicalSearchError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return _repository_response(repository)
 
@@ -199,14 +202,14 @@ async def read_repository_file(
 
 @router.post(
     "/v1/repositories/{repository_id}/search",
-    response_model=list[SearchMatchResponse],
+    response_model=SearchResponse,
 )
 async def search_repository(
     request: Request,
     repository_id: int,
     body: SearchRequest,
-) -> list[SearchMatchResponse]:
-    """Return source chunks whose embeddings are closest to the query.
+) -> SearchResponse:
+    """Return source chunks ranked by semantic and lexical retrieval.
 
     The API-supplied `max_results` is passed into the service instead of letting
     callers request an unlimited scan result.
@@ -215,25 +218,31 @@ async def search_repository(
     repository = await _repository_or_404(store, repository_id)
     service = _repository_service(request)
     try:
-        matches = await service.search_code(
+        query_plan, matches = await service.search_code_with_plan(
             repository,
             body.query,
             max_results=body.max_results,
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RepositoryStoreError as exc:
+    except (RepositoryStoreError, LexicalSearchError, InferenceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return [
-        SearchMatchResponse(
-            path=item.path,
-            start_line=item.start_line,
-            end_line=item.end_line,
-            text=item.text,
-            score=item.score,
-        )
-        for item in matches
-    ]
+    return SearchResponse(
+        query_plan=SearchQueryPlanResponse(
+            embedding_query=query_plan.embedding_query,
+            lexical_queries=list(query_plan.lexical_queries),
+        ),
+        matches=[
+            SearchMatchResponse(
+                path=item.path,
+                start_line=item.start_line,
+                end_line=item.end_line,
+                text=item.text,
+                score=item.score,
+            )
+            for item in matches
+        ],
+    )
 
 
 @router.post("/v1/repositories/{repository_id}/chat/stream")
@@ -266,7 +275,7 @@ async def stream_repository_chat(
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RepositoryStoreError as exc:
+    except (RepositoryStoreError, LexicalSearchError, InferenceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # Keep the user's original conversation unchanged and prepend source context

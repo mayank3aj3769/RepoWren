@@ -14,6 +14,8 @@ DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_DATABASE_URL = "postgresql://repowren:repowren@127.0.0.1:5432/repowren"
 DEFAULT_EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_ELASTICSEARCH_URL = "http://127.0.0.1:9200"
+DEFAULT_ELASTICSEARCH_INDEX = "repowren-chunks"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Existing process variables win over values stored in the local .env file.
@@ -29,6 +31,8 @@ class Settings:
     api_url: str = DEFAULT_API_URL
     database_url: str = DEFAULT_DATABASE_URL
     embedding_model_id: str = DEFAULT_EMBEDDING_MODEL_ID
+    elasticsearch_url: str = DEFAULT_ELASTICSEARCH_URL
+    elasticsearch_index: str = DEFAULT_ELASTICSEARCH_INDEX
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -45,5 +49,11 @@ class Settings:
             database_url=os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip(),
             embedding_model_id=os.getenv(
                 "EMBEDDING_MODEL_ID", DEFAULT_EMBEDDING_MODEL_ID
+            ).strip(),
+            elasticsearch_url=os.getenv(
+                "ELASTICSEARCH_URL", DEFAULT_ELASTICSEARCH_URL
+            ).rstrip("/"),
+            elasticsearch_index=os.getenv(
+                "ELASTICSEARCH_INDEX", DEFAULT_ELASTICSEARCH_INDEX
             ).strip(),
         )

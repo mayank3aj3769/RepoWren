@@ -14,6 +14,7 @@ from repowren.config import Settings
 from repowren.embeddings import EmbeddingBackend, SentenceTransformerEmbeddings
 from repowren.inference.base import InferenceBackend
 from repowren.inference.vllm import VLLMClient
+from repowren.lexical import ElasticsearchLexicalSearchIndex, LexicalSearchIndex
 from repowren.persistence.postgres import PostgresRepositoryStore
 from repowren.repositories.store import RepositoryStore
 from repowren.repositories.service import RepositoryService
@@ -29,6 +30,7 @@ def create_app(
     inference: InferenceBackend | None = None,
     repository_store: RepositoryStore | None = None,
     embeddings: EmbeddingBackend | None = None,
+    lexical_index: LexicalSearchIndex | None = None,
 ) -> FastAPI:
     """Build and connect the API's inference and repository dependencies.
 
@@ -44,21 +46,36 @@ def create_app(
         repository_store = PostgresRepositoryStore(settings.database_url)
     if embeddings is None:
         embeddings = SentenceTransformerEmbeddings(settings.embedding_model_id)
-    repository_service = RepositoryService(repository_store, embeddings)
+    owns_lexical_index = lexical_index is None
+    if lexical_index is None:
+        lexical_index = ElasticsearchLexicalSearchIndex(
+            settings.elasticsearch_url,
+            settings.elasticsearch_index,
+        )
+    repository_service = RepositoryService(
+        repository_store,
+        embeddings,
+        lexical_index,
+        inference,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """Prepare owned resources at startup and release them at shutdown."""
-        # Database migrations must finish before the API accepts requests.
-        if owns_repository_store:
-            await repository_store.initialize()
         try:
+            # Both indexes must be ready before the API accepts requests.
+            if owns_repository_store:
+                await repository_store.initialize()
+            if owns_lexical_index:
+                await lexical_index.initialize()
             yield
         finally:
             # Only close objects created here; injected test objects belong to
             # the caller that supplied them.
             if owns_repository_store:
                 await repository_store.close()
+            if owns_lexical_index:
+                await lexical_index.close()
             if owns_inference:
                 await inference.close()
 
@@ -70,6 +87,7 @@ def create_app(
     )
     application.state.inference = inference
     application.state.repository_store = repository_store
+    application.state.lexical_index = lexical_index
     application.state.repository_service = repository_service
     application.include_router(router)
 

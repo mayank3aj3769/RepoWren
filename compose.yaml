@@ -19,6 +19,26 @@ services:
       retries: 10
     restart: unless-stopped
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    container_name: repowren-elasticsearch
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' > /dev/null || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   vllm:
     build:
       context: .
@@ -61,5 +81,6 @@ services:
 
 volumes:
   postgres-data:
+  elasticsearch-data:
   huggingface-cache:
   vllm-cache:
