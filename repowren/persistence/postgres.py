@@ -11,7 +11,12 @@ from pgvector.psycopg import register_vector_async
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from repowren.repositories.models import RepositoryChunk, RepositoryRecord, SearchMatch
+from repowren.repositories.models import (
+    RepositoryChunk,
+    RepositoryRecord,
+    SearchMatch,
+    build_chunk_key,
+)
 from repowren.repositories.store import RepositoryStoreError
 
 
@@ -258,6 +263,12 @@ class PostgresRepositoryStore:
                     metadata = row["metadata"]
                     matches.append(
                         SearchMatch(
+                            chunk_key=build_chunk_key(
+                                repository_id,
+                                str(metadata["path"]),
+                                int(metadata["start_line"]),
+                                int(metadata["end_line"]),
+                            ),
                             path=str(metadata["path"]),
                             start_line=int(metadata["start_line"]),
                             end_line=int(metadata["end_line"]),

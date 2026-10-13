@@ -5,6 +5,8 @@ import pytest
 from repowren.config import (
     DEFAULT_DATABASE_URL,
     DEFAULT_EMBEDDING_MODEL_ID,
+    DEFAULT_ELASTICSEARCH_INDEX,
+    DEFAULT_ELASTICSEARCH_URL,
     DEFAULT_MODEL_ID,
     DEFAULT_VLLM_BASE_URL,
     Settings,
@@ -22,6 +24,8 @@ def test_settings_use_small_public_qwen_by_default(
         "REPOWREN_API_URL",
         "DATABASE_URL",
         "EMBEDDING_MODEL_ID",
+        "ELASTICSEARCH_URL",
+        "ELASTICSEARCH_INDEX",
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -32,6 +36,8 @@ def test_settings_use_small_public_qwen_by_default(
     assert settings.vllm_base_url == DEFAULT_VLLM_BASE_URL
     assert settings.database_url == DEFAULT_DATABASE_URL
     assert settings.embedding_model_id == DEFAULT_EMBEDDING_MODEL_ID
+    assert settings.elasticsearch_url == DEFAULT_ELASTICSEARCH_URL
+    assert settings.elasticsearch_index == DEFAULT_ELASTICSEARCH_INDEX
 
 
 def test_settings_read_vllm_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,3 +72,13 @@ def test_settings_read_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings.from_environment()
 
     assert settings.embedding_model_id == "owner/test-embeddings"
+
+
+def test_settings_read_elasticsearch_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELASTICSEARCH_URL", "http://127.0.0.1:9300/")
+    monkeypatch.setenv("ELASTICSEARCH_INDEX", "test-chunks")
+
+    settings = Settings.from_environment()
+
+    assert settings.elasticsearch_url == "http://127.0.0.1:9300"
+    assert settings.elasticsearch_index == "test-chunks"

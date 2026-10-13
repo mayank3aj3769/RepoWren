@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pathspec
 
+from repowren.api.schemas import ChatMessage
 from repowren.embeddings import EmbeddingBackend
+from repowren.inference.base import InferenceBackend, InferenceError
+from repowren.lexical import LexicalSearchIndex
 from repowren.repositories.models import (
     FileMetadata,
     RepositoryChunk,
@@ -26,6 +31,47 @@ MAX_SEARCH_RESULTS = 50
 MAX_CONTEXT_CHARACTERS = 9_000
 CHUNK_LINES = 20
 CONTEXT_RESULTS = 5
+SEARCH_CANDIDATE_LIMIT = 20
+RRF_RANK_OFFSET = 60
+MAX_LEXICAL_QUERIES = 8
+MAX_PLANNER_TOKENS = 192
+PLANNER_FILLER_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "code",
+        "do",
+        "does",
+        "function",
+        "how",
+        "many",
+        "method",
+        "the",
+        "too",
+        "what",
+        "where",
+        "which",
+    }
+)
+
+SEARCH_PLANNER_PROMPT = """You plan hybrid searches over source-code chunks.
+Return only a JSON object with this exact shape:
+{"embedding_query":"...", "lexical_queries":["...", "..."]}
+
+Rules:
+- embedding_query is one concise natural-language description of the code sought.
+- lexical_queries contains 1 to 8 high-signal strings to try verbatim in code.
+- Prefer supplied or plausible identifiers, API names, error text, configuration
+  keys, and path fragments. For an important code concept, include a snake_case
+  identifier and, when useful, a camelCase or PascalCase alternative.
+- Exclude question words and filler such as where, how, code, too, and many.
+- Preserve technical names exactly. The probes need not be claims that code exists.
+- Do not include Markdown or any text outside the JSON object.
+
+Example:
+User: Where does the app refresh an expired auth token?
+Output: {"embedding_query":"authentication token refresh after expiration","lexical_queries":["refresh_token","refreshToken","TokenExpired","token expired"]}
+"""
 
 # This is the one obvious list to extend when another kind of file should never
 # be read or embedded. The repository's root .gitignore is added to these rules.
@@ -55,12 +101,28 @@ class RepositoryAccessError(ValueError):
     """A requested path or search request is unsafe or invalid."""
 
 
+@dataclass(frozen=True, slots=True)
+class SearchQueryPlan:
+    """The semantic sentence and exact strings derived from one user query."""
+
+    embedding_query: str
+    lexical_queries: tuple[str, ...]
+
+
 class RepositoryService:
     """Coordinate safe file access with embeddings stored in PostgreSQL."""
 
-    def __init__(self, store: RepositoryStore, embeddings: EmbeddingBackend) -> None:
+    def __init__(
+        self,
+        store: RepositoryStore,
+        embeddings: EmbeddingBackend,
+        lexical_index: LexicalSearchIndex,
+        inference: InferenceBackend,
+    ) -> None:
         self._store = store
         self._embeddings = embeddings
+        self._lexical_index = lexical_index
+        self._inference = inference
 
     async def register(self, path: str, name: str | None = None) -> RepositoryRecord:
         """Register a Git root and completely rebuild its semantic index.
@@ -92,7 +154,11 @@ class RepositoryService:
             RepositoryChunk(content=content, metadata=metadata, embedding=vector)
             for (content, metadata), vector in zip(chunk_inputs, vectors, strict=True)
         ]
+        # PostgreSQL owns the authoritative semantic snapshot. Elasticsearch is
+        # replaced second because the two services cannot share a transaction.
+        # If the lexical write fails, re-registering repeats both full rebuilds.
         await self._store.replace_chunks(record.id, chunks)
+        await self._lexical_index.replace_repository_chunks(record.id, chunks)
         return record
 
     @staticmethod
@@ -169,7 +235,22 @@ class RepositoryService:
         *,
         max_results: int = MAX_SEARCH_RESULTS,
     ) -> list[SearchMatch]:
-        """Find chunks with meaning similar to the question.
+        """Return only fused matches for repository-chat context."""
+        _, matches = await self.search_code_with_plan(
+            repository,
+            query,
+            max_results=max_results,
+        )
+        return matches
+
+    async def search_code_with_plan(
+        self,
+        repository: RepositoryRecord,
+        query: str,
+        *,
+        max_results: int = MAX_SEARCH_RESULTS,
+    ) -> tuple[SearchQueryPlan, list[SearchMatch]]:
+        """Combine semantic and lexical candidates with reciprocal rank fusion.
 
         For example, a question containing ``How is an order total computed?``
         can retrieve a chunk containing ``def calculate_price(...)`` even though
@@ -179,14 +260,61 @@ class RepositoryService:
         cleaned_query = query.strip()
         if not cleaned_query:
             raise RepositoryAccessError("Search query cannot be empty.")
-        vector_rows = await asyncio.to_thread(self._embeddings.encode, [cleaned_query])
+        query_plan = await self._plan_search_queries(cleaned_query)
+        vector_rows = await asyncio.to_thread(
+            self._embeddings.encode,
+            [query_plan.embedding_query],
+        )
         if len(vector_rows) != 1:
             raise RepositoryAccessError("Embedding model did not return a query vector.")
-        return await self._store.search_chunks(
-            repository.id,
-            vector_rows[0],
-            max_results,
+        # The backends are independent once the single query vector exists.
+        # Running them together avoids adding their network latencies while
+        # preserving clear failures instead of silently dropping one result set.
+        semantic_matches, lexical_matches = await asyncio.gather(
+            self._store.search_chunks(
+                repository.id,
+                vector_rows[0],
+                SEARCH_CANDIDATE_LIMIT,
+            ),
+            self._lexical_index.search(
+                repository.id,
+                query_plan.lexical_queries,
+                SEARCH_CANDIDATE_LIMIT,
+            ),
         )
+        return (
+            query_plan,
+            fuse_search_results(
+                semantic_matches,
+                lexical_matches,
+                max_results=max_results,
+            ),
+        )
+
+    async def _plan_search_queries(self, query: str) -> SearchQueryPlan:
+        """Ask vLLM for focused semantic and exact-text retrieval strings.
+
+        Planning uses the existing local chat endpoint with deterministic
+        sampling. If a model returns prose or invalid JSON, search still works
+        with the original user query rather than failing on model formatting.
+        """
+        try:
+            parts = [
+                part
+                async for part in self._inference.stream_chat(
+                    [
+                        ChatMessage(role="system", content=SEARCH_PLANNER_PROMPT),
+                        ChatMessage(role="user", content=query),
+                    ],
+                    max_tokens=MAX_PLANNER_TOKENS,
+                    temperature=0.0,
+                )
+            ]
+        except InferenceError:
+            # Search remains useful while vLLM is starting or temporarily down.
+            # Storage failures are still surfaced rather than hidden here.
+            return SearchQueryPlan(query, (query,))
+        return parse_search_plan("".join(parts), fallback_query=query)
 
     async def build_context(
         self,
@@ -212,7 +340,7 @@ class RepositoryService:
         context = "\n\n".join(excerpts)[:MAX_CONTEXT_CHARACTERS]
         return (
             f"You are answering a question about the registered repository "
-            f"'{repository.name}'. Use the semantic source chunks below. Cite file "
+            f"'{repository.name}'. Use the hybrid-ranked source chunks below. Cite file "
             "paths and line ranges when possible. If the chunks are insufficient, "
             "say so.\n\n"
             f"{context}"
@@ -317,3 +445,81 @@ class RepositoryService:
                 return b"\x00" not in stream.read(4_096)
         except OSError:
             return False
+
+
+def fuse_search_results(
+    semantic_matches: Sequence[SearchMatch],
+    lexical_matches: Sequence[SearchMatch],
+    *,
+    max_results: int,
+) -> list[SearchMatch]:
+    """Merge two rankings without comparing cosine and BM25 scores directly.
+
+    A chunk ranked first by both backends receives ``1/61 + 1/61``. A chunk
+    present in just one list receives only that list's contribution. A small
+    dictionary keyed by ``chunk_key`` is enough to combine the two rankings.
+    """
+    if max_results < 1:
+        raise RepositoryAccessError("Search result limit must be positive.")
+
+    scores: dict[str, float] = {}
+    matches_by_key: dict[str, SearchMatch] = {}
+    first_seen: dict[str, int] = {}
+    for ranked_matches in (semantic_matches, lexical_matches):
+        for rank, match in enumerate(ranked_matches, start=1):
+            if match.chunk_key not in first_seen:
+                first_seen[match.chunk_key] = len(first_seen)
+                matches_by_key[match.chunk_key] = match
+            scores[match.chunk_key] = scores.get(match.chunk_key, 0.0) + (
+                1.0 / (RRF_RANK_OFFSET + rank)
+            )
+
+    ordered_keys = sorted(
+        scores,
+        key=lambda key: (-scores[key], first_seen[key]),
+    )
+    return [
+        replace(matches_by_key[key], score=scores[key])
+        for key in ordered_keys[:max_results]
+    ]
+
+
+def parse_search_plan(response: str, *, fallback_query: str) -> SearchQueryPlan:
+    """Validate the model's small JSON plan and provide a safe fallback."""
+    fallback = SearchQueryPlan(fallback_query, (fallback_query,))
+    text = response.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]).strip() if len(lines) >= 3 else ""
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+    if not isinstance(value, dict):
+        return fallback
+
+    embedding_query = value.get("embedding_query")
+    raw_lexical_queries = value.get("lexical_queries")
+    if not isinstance(embedding_query, str) or not isinstance(
+        raw_lexical_queries, list
+    ):
+        return fallback
+    embedding_query = " ".join(embedding_query.split())[:500]
+    if not embedding_query:
+        return fallback
+
+    lexical_queries: list[str] = []
+    seen: set[str] = set()
+    for item in raw_lexical_queries:
+        if not isinstance(item, str):
+            continue
+        cleaned = " ".join(item.split())[:200]
+        key = cleaned.casefold()
+        if cleaned and key not in seen and key not in PLANNER_FILLER_WORDS:
+            lexical_queries.append(cleaned)
+            seen.add(key)
+        if len(lexical_queries) == MAX_LEXICAL_QUERIES:
+            break
+    if not lexical_queries:
+        return fallback
+    return SearchQueryPlan(embedding_query, tuple(lexical_queries))

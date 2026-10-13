@@ -79,7 +79,7 @@ class FileContentResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """A bounded semantic source-code search.
+    """A bounded hybrid source-code search.
 
     Example: ``{'query': 'send_order', 'max_results': 10}``. An empty query or
     result limit above 100 is rejected before the filesystem is scanned.
@@ -90,10 +90,10 @@ class SearchRequest(BaseModel):
 
 
 class SearchMatchResponse(BaseModel):
-    """One semantically similar indexed source chunk.
+    """One hybrid-ranked indexed source chunk.
 
-    ``score`` is cosine similarity: a larger value means the stored chunk points
-    in a more similar direction to the query embedding.
+    ``score`` is the combined reciprocal-rank value, not raw cosine similarity
+    or a raw Elasticsearch BM25 score. Larger values rank ahead of smaller ones.
     """
 
     path: str
@@ -101,3 +101,17 @@ class SearchMatchResponse(BaseModel):
     end_line: int
     text: str
     score: float
+
+
+class SearchQueryPlanResponse(BaseModel):
+    """The model-produced strings used by the two retrieval backends."""
+
+    embedding_query: str
+    lexical_queries: list[str]
+
+
+class SearchResponse(BaseModel):
+    """The visible query plan and its aggregate hybrid search results."""
+
+    query_plan: SearchQueryPlanResponse
+    matches: list[SearchMatchResponse]
