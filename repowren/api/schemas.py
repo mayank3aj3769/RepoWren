@@ -19,13 +19,13 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """A bounded request sent to the local model.
 
-    The defaults request at most 256 new tokens with low randomness. Pydantic
+    The defaults allow a useful long-form answer with low randomness. Pydantic
     rejects an empty message list, more than 32 messages, or values outside the
     declared ranges and FastAPI returns HTTP 422 automatically.
     """
 
     messages: list[ChatMessage] = Field(min_length=1, max_length=32)
-    max_tokens: int = Field(default=256, ge=1, le=1_024)
+    max_tokens: int = Field(default=2_048, ge=1, le=4_096)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
 
@@ -108,6 +108,22 @@ class SearchQueryPlanResponse(BaseModel):
 
     embedding_query: str
     lexical_queries: list[str]
+    cross_questions: list[str] = Field(default_factory=list)
+
+
+class GraphSearchMatchResponse(BaseModel):
+    """One bounded graph expansion with the retrieval seed that led to it."""
+
+    path: str
+    start_line: int
+    end_line: int
+    text: str
+    relation: str
+    detail: str | None
+    seed_path: str
+    seed_start_line: int
+    seed_end_line: int
+    depth: int = 1
 
 
 class SearchResponse(BaseModel):
@@ -115,3 +131,4 @@ class SearchResponse(BaseModel):
 
     query_plan: SearchQueryPlanResponse
     matches: list[SearchMatchResponse]
+    graph_matches: list[GraphSearchMatchResponse] = Field(default_factory=list)

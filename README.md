@@ -2,9 +2,10 @@
 
 RepoWren is a lightweight, local-first coding-agent foundation. A terminal
 client and a Next.js web UI talk to a small FastAPI backend, and the backend
-streams generated text from a separate vLLM server running in Docker. PostgreSQL with pgvector stores
-registered repositories, source chunks, metadata, and embeddings. Elasticsearch
-stores a second, text-only copy of those chunks for exact words and identifiers.
+streams generated text from a separate vLLM server running in Docker. PostgreSQL
+with pgvector stores registered repositories, source chunks, metadata,
+embeddings, and a small deterministic chunk graph. Elasticsearch stores a
+second, text-only copy of those chunks for exact words and identifiers.
 
 ```text
 terminal / Next.js :3000 -> RepoWren API :8000 -> Docker vLLM :8001 -> local NVIDIA GPU
@@ -139,27 +140,36 @@ it arrives. Register a local Git repository, inspect it, then ask a question:
 How does function_name work?
 ```
 
-Registering reads allowed UTF-8 files once, splits them into fixed 20-line
-chunks, creates CPU embeddings, and replaces that repository's PostgreSQL rows.
+Registering reads allowed UTF-8 files once, keeps ordinary Python functions and
+classes whole (splitting only symbols over 100 lines), and uses overlapping
+60-line windows for other text. It creates CPU embeddings, builds bounded chunk
+relationships, and replaces
+that repository's PostgreSQL chunks and graph edges in one transaction.
 It then replaces the matching text-only Elasticsearch documents. PostgreSQL is
 written first; if Elasticsearch fails, the API reports the failure instead of
 silently using only semantic results. Register the same path again to rebuild
 both snapshots and repair either index.
 
-Search first asks the local vLLM model to turn the user's request into one
-semantic query and up to eight short exact-text strings such as identifiers,
-error text, or configuration keys. PostgreSQL embeds the semantic query and
-finds conceptually similar code with exact pgvector cosine search, while
+Indexing and retrieval are explicit LangGraph state graphs. Search asks the
+local vLLM model to turn the user's request into one semantic query, up to three
+cross-questions, and up to eight short exact-text strings such as identifiers,
+error text, or configuration keys. PostgreSQL embeds every semantic question
+and finds conceptually similar code with exact pgvector cosine search, while
 Elasticsearch searches the exact-text strings with boosted phrase matches and
 BM25. RepoWren asks each backend for 20 candidates concurrently and uses
 Reciprocal Rank Fusion (RRF) to combine their ranks. Raw cosine and BM25 scores
-are never compared. The terminal labels the aggregate hybrid score, and
-repository chat sends the best five hybrid chunks to vLLM. If vLLM is starting,
+are never compared. The top hybrid chunks become graph-retrieval seeds. RepoWren
+then adds a bounded two-hop expansion from deterministic `adjacent`, Python
+`calls`, `imports`, and test-to-source relationships. Relative imports are
+resolved from module context. The terminal displays those related
+chunks separately because they are not relevance-ranked. Repository chat sends
+the best five hybrid chunks plus at most eight graph-related chunks to vLLM. If
+vLLM is starting,
 temporarily unavailable, or emits malformed planner JSON, search safely falls
 back to the original user query instead of returning a planner-related 503.
 Compose starts vLLM with a 4,096-token context window by default. If a prompt
 still exceeds the model limit, the adapter retries once with bounded source
-context and a shorter completion instead of failing the chat request outright.
+context while preserving the requested answer length.
 Type `/help` for commands or `/exit` to finish. Registration accepts only an
 existing Git repository. RepoWren ignores `.gitignore` entries, secrets such as
 `.env`, binary files, generated directories, model weights, files over 1 MB,
@@ -167,9 +177,11 @@ and paths that escape the repository root.
 
 ## Use the web UI
 
-The local Next.js application mirrors the terminal workflow with repository
-registration and selection, streamed chat, visible hybrid-search query plans,
-RRF-ranked search results, and safe file browsing. Install and start it after
+The local Next.js application is chat-first: it provides repository registration
+and selection, streamed answers, and an inspectable GraphRAG trace containing
+the query plan, ranked seeds, relationships, and traversal depth. The standalone
+search and file-browser tabs were removed; their diagnostic APIs remain. Install
+and start it after
 the RepoWren API is running:
 
 ```text
@@ -194,8 +206,11 @@ The HTTP API remains available to other clients:
 - `GET /v1/repositories/{id}/file?path=...` reads one safe UTF-8 file.
 - `POST /v1/repositories/{id}/search` returns the semantic and exact-text query
   plan plus hybrid-ranked chunks with path, line range, text, and combined RRF
-  score. The terminal prints that plan before the aggregate results.
-- `POST /v1/repositories/{id}/chat/stream` injects the five closest chunks.
+  score. `graph_matches` separately returns bounded two-hop neighbors with the
+  seed and relationship that caused each expansion. The terminal prints both.
+- `POST /v1/repositories/{id}/chat/stream` first emits a `retrieval` event, then
+  streams the answer. It injects five hybrid seeds and at most eight graph-related
+  chunks labeled by provenance and traversal depth.
 
 ## Benchmark
 
@@ -241,7 +256,7 @@ The probe reports time to first text and total request time. Docker Desktop and
 ```text
 RepoWren/
 |-- repowren/             API, repository tools, search adapters, and vLLM adapter
-|-- web/                  Next.js repository chat, search, and file browser
+|-- web/                  Next.js repository chat and GraphRAG trace
 |-- tests/                deterministic offline tests
 |-- benchmarks/           end-to-end timing probe
 |-- docs/architecture.md  architecture and milestone boundaries

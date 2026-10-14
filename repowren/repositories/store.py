@@ -5,7 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from repowren.repositories.models import RepositoryChunk, RepositoryRecord, SearchMatch
+from repowren.repositories.models import (
+    GraphSearchMatch,
+    RepositoryChunk,
+    RepositoryGraphEdge,
+    RepositoryRecord,
+    SearchMatch,
+)
 
 
 class RepositoryStoreError(RuntimeError):
@@ -31,6 +37,7 @@ class RepositoryStore(Protocol):
         self,
         repository_id: int,
         chunks: Sequence[RepositoryChunk],
+        graph_edges: Sequence[RepositoryGraphEdge],
     ) -> None: ...
 
     async def search_chunks(
@@ -39,3 +46,10 @@ class RepositoryStore(Protocol):
         query_embedding: Sequence[float],
         limit: int,
     ) -> list[SearchMatch]: ...
+
+    async def graph_neighbors(
+        self,
+        repository_id: int,
+        seed_chunk_keys: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchMatch]: ...

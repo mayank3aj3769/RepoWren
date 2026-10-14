@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -12,6 +14,7 @@ from repowren.api.schemas import (
     ChatRequest,
     FileContentResponse,
     FileMetadataResponse,
+    GraphSearchMatchResponse,
     RepositoryCreate,
     RepositoryResponse,
     SearchMatchResponse,
@@ -218,19 +221,23 @@ async def search_repository(
     repository = await _repository_or_404(store, repository_id)
     service = _repository_service(request)
     try:
-        query_plan, matches = await service.search_code_with_plan(
+        query_plan, matches, graph_matches = await service.search_code_with_graph(
             repository,
             body.query,
             max_results=body.max_results,
+            max_graph_results=min(body.max_results, 10),
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (RepositoryStoreError, LexicalSearchError, InferenceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    seeds_by_key = {match.chunk_key: match for match in matches}
+    seeds_by_key.update({item.match.chunk_key: item.match for item in graph_matches})
     return SearchResponse(
         query_plan=SearchQueryPlanResponse(
             embedding_query=query_plan.embedding_query,
             lexical_queries=list(query_plan.lexical_queries),
+            cross_questions=list(query_plan.cross_questions),
         ),
         matches=[
             SearchMatchResponse(
@@ -241,6 +248,22 @@ async def search_repository(
                 score=item.score,
             )
             for item in matches
+        ],
+        graph_matches=[
+            GraphSearchMatchResponse(
+                path=item.match.path,
+                start_line=item.match.start_line,
+                end_line=item.match.end_line,
+                text=item.match.text,
+                relation=item.relation,
+                detail=item.detail,
+                seed_path=seeds_by_key[item.seed_chunk_key].path,
+                seed_start_line=seeds_by_key[item.seed_chunk_key].start_line,
+                seed_end_line=seeds_by_key[item.seed_chunk_key].end_line,
+                depth=item.depth,
+            )
+            for item in graph_matches
+            if item.seed_chunk_key in seeds_by_key
         ],
     )
 
@@ -269,9 +292,11 @@ async def stream_repository_chat(
 
     repository_service = _repository_service(request)
     try:
-        context = await repository_service.build_context(
-            repository,
-            user_message,
+        context, query_plan, matches, graph_matches = (
+            await repository_service.build_context_with_trace(
+                repository,
+                user_message,
+            )
         )
     except RepositoryAccessError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -286,8 +311,51 @@ async def stream_repository_chat(
         }
     )
     chat_service = ChatService(_inference(request))
+
+    sources_by_key = {match.chunk_key: match for match in matches}
+    sources_by_key.update({item.match.chunk_key: item.match for item in graph_matches})
+    retrieval_event = {
+        "type": "retrieval",
+        "query_plan": {
+            "embedding_query": query_plan.embedding_query,
+            "lexical_queries": list(query_plan.lexical_queries),
+            "cross_questions": list(query_plan.cross_questions),
+        },
+        "matches": [
+            {
+                "path": item.path,
+                "start_line": item.start_line,
+                "end_line": item.end_line,
+                "text": item.text,
+                "score": item.score,
+            }
+            for item in matches
+        ],
+        "graph_matches": [
+            {
+                "path": item.match.path,
+                "start_line": item.match.start_line,
+                "end_line": item.match.end_line,
+                "text": item.match.text,
+                "relation": item.relation,
+                "detail": item.detail,
+                "seed_path": sources_by_key[item.seed_chunk_key].path,
+                "seed_start_line": sources_by_key[item.seed_chunk_key].start_line,
+                "seed_end_line": sources_by_key[item.seed_chunk_key].end_line,
+                "depth": item.depth,
+            }
+            for item in graph_matches
+            if item.seed_chunk_key in sources_by_key
+        ],
+    }
+
+    async def stream_with_retrieval() -> AsyncIterator[str]:
+        yield json.dumps(retrieval_event) + "\n"
+        async for event in chat_service.stream_events(enriched):
+            yield event
+
     return StreamingResponse(
-        chat_service.stream_events(enriched),
+        stream_with_retrieval(),
         media_type="application/x-ndjson",
         headers={"X-Content-Type-Options": "nosniff"},
     )

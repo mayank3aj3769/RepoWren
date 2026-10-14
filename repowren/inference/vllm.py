@@ -12,8 +12,6 @@ from repowren.config import Settings
 from repowren.inference.base import InferenceError, InferenceStatus
 
 FALLBACK_CONTEXT_CHARACTERS = 5_000
-FALLBACK_MAX_TOKENS = 128
-
 
 class _ContextLimitError(RuntimeError):
     """The model rejected a prompt because it exceeded its context window."""
@@ -175,7 +173,10 @@ class VLLMClient:
                             message.model_dump()
                             for message in _fallback_messages(messages)
                         ],
-                        "max_tokens": min(max_tokens, FALLBACK_MAX_TOKENS),
+                        # Shorten the input, not the requested answer. The old
+                        # 128-token retry cap visibly cut otherwise healthy
+                        # responses in the chat UI.
+                        "max_tokens": max_tokens,
                     }
                     async with self._client.stream(
                         "POST", "/v1/chat/completions", json=fallback_payload

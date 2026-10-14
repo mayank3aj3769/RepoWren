@@ -113,5 +113,5 @@ def test_stream_chat_retries_with_short_context_after_context_limit() -> None:
 
     tokens, fallback = asyncio.run(collect())
     assert tokens == ["fallback"]
-    assert fallback["max_tokens"] == 128
+    assert fallback["max_tokens"] == 256
     assert len(fallback["messages"][0]["content"]) <= 3_500

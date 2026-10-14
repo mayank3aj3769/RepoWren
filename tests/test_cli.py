@@ -96,6 +96,19 @@ def test_repository_commands_select_and_use_repository_chat(
                             "score": 0.8765,
                         }
                     ],
+                    "graph_matches": [
+                        {
+                            "path": "pricing.py",
+                            "start_line": 20,
+                            "end_line": 28,
+                            "text": "def apply_discount(total):",
+                            "relation": "calls",
+                            "detail": "apply_discount",
+                            "seed_path": "app.py",
+                            "seed_start_line": 1,
+                            "seed_end_line": 8,
+                        }
+                    ],
                 },
             )
         if request.url.path == "/v1/repositories/7/chat/stream":
@@ -134,4 +147,6 @@ def test_repository_commands_select_and_use_repository_chat(
     assert "  - sum(items)" in output
     assert "Hybrid results (semantic + exact-text ranks):" in output
     assert "app.py:1-8 (hybrid score 0.876)" in output
+    assert "Related graph context (not relevance-ranked):" in output
+    assert "pricing.py:20-28 via app.py:1-8 calls (apply_discount)" in output
     assert "RepoWren> Found it" in output

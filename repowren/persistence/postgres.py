@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from importlib import resources
+from typing import cast
 
 import psycopg
 from pgvector import Vector
@@ -12,7 +13,10 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from repowren.repositories.models import (
+    GraphSearchMatch,
+    GraphTraversalRelation,
     RepositoryChunk,
+    RepositoryGraphEdge,
     RepositoryRecord,
     SearchMatch,
     build_chunk_key,
@@ -197,8 +201,9 @@ class PostgresRepositoryStore:
         self,
         repository_id: int,
         chunks: Sequence[RepositoryChunk],
+        graph_edges: Sequence[RepositoryGraphEdge],
     ) -> None:
-        """Replace every old chunk with one newly generated snapshot.
+        """Replace every old chunk and graph edge in one transaction.
 
         One item contains source text, JSON metadata such as
         ``{'path': 'src/cart.py', 'start_line': 1, 'end_line': 20}``, and its
@@ -211,27 +216,52 @@ class PostgresRepositoryStore:
                     "DELETE FROM repository_chunks WHERE repository_id = %s",
                     (repository_id,),
                 )
-                if not chunks:
-                    return
-                async with connection.cursor() as cursor:
-                    await cursor.executemany(
-                        """
-                        INSERT INTO repository_chunks
-                            (repository_id, content, metadata, embedding)
-                        VALUES (%s, %s, %s, %s)
-                        """,
-                        [
-                            (
-                                repository_id,
-                                item.content,
-                                Jsonb(item.metadata),
-                                # Vector prevents psycopg from treating the
-                                # Python list as a PostgreSQL float array.
-                                Vector(item.embedding),
-                            )
-                            for item in chunks
-                        ],
-                    )
+                if chunks:
+                    async with connection.cursor() as cursor:
+                        await cursor.executemany(
+                            """
+                            INSERT INTO repository_chunks
+                                (repository_id, chunk_key, content, metadata, embedding)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            [
+                                (
+                                    repository_id,
+                                    build_chunk_key(
+                                        repository_id,
+                                        str(item.metadata["path"]),
+                                        int(item.metadata["start_line"]),
+                                        int(item.metadata["end_line"]),
+                                    ),
+                                    item.content,
+                                    Jsonb(item.metadata),
+                                    # Vector prevents psycopg from treating the
+                                    # Python list as a PostgreSQL float array.
+                                    Vector(item.embedding),
+                                )
+                                for item in chunks
+                            ],
+                        )
+                if graph_edges:
+                    async with connection.cursor() as cursor:
+                        await cursor.executemany(
+                            """
+                            INSERT INTO repository_chunk_edges
+                                (repository_id, source_chunk_key,
+                                 target_chunk_key, relation, detail)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            [
+                                (
+                                    repository_id,
+                                    edge.source_chunk_key,
+                                    edge.target_chunk_key,
+                                    edge.relation,
+                                    edge.detail,
+                                )
+                                for edge in graph_edges
+                            ],
+                        )
         except psycopg.Error as exc:
             raise RepositoryStoreError(f"Could not replace repository chunks: {exc}") from exc
 
@@ -279,6 +309,121 @@ class PostgresRepositoryStore:
                 return matches
         except psycopg.Error as exc:
             raise RepositoryStoreError(f"Could not search repository chunks: {exc}") from exc
+
+    async def graph_neighbors(
+        self,
+        repository_id: int,
+        seed_chunk_keys: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchMatch]:
+        """Return bounded one-hop neighbors without changing hybrid scores."""
+        if not seed_chunk_keys or limit < 1:
+            return []
+        try:
+            async with await self._connect() as connection:
+                cursor = await connection.execute(
+                    """
+                    WITH neighbors AS (
+                        SELECT
+                            CASE
+                                WHEN edge.source_chunk_key = ANY(%s)
+                                    THEN edge.source_chunk_key
+                                ELSE edge.target_chunk_key
+                            END AS seed_chunk_key,
+                            CASE
+                                WHEN edge.source_chunk_key = ANY(%s)
+                                    THEN edge.target_chunk_key
+                                ELSE edge.source_chunk_key
+                            END AS neighbor_chunk_key,
+                            CASE
+                                WHEN edge.source_chunk_key = ANY(%s)
+                                    THEN edge.relation
+                                WHEN edge.relation = 'calls' THEN 'called_by'
+                                WHEN edge.relation = 'imports' THEN 'imported_by'
+                                WHEN edge.relation = 'tests' THEN 'tested_by'
+                                ELSE edge.relation
+                            END AS relation,
+                            edge.detail
+                        FROM repository_chunk_edges AS edge
+                        WHERE edge.repository_id = %s
+                          AND (
+                              edge.source_chunk_key = ANY(%s)
+                              OR edge.target_chunk_key = ANY(%s)
+                          )
+                    ),
+                    deduplicated AS (
+                        SELECT DISTINCT ON (neighbor_chunk_key)
+                            seed_chunk_key, neighbor_chunk_key, relation, detail
+                        FROM neighbors
+                        WHERE neighbor_chunk_key <> ALL(%s)
+                        ORDER BY neighbor_chunk_key,
+                            CASE relation
+                                WHEN 'calls' THEN 1
+                                WHEN 'called_by' THEN 1
+                                WHEN 'imports' THEN 2
+                                WHEN 'imported_by' THEN 2
+                                WHEN 'tests' THEN 1
+                                WHEN 'tested_by' THEN 1
+                                ELSE 3
+                            END,
+                            seed_chunk_key
+                    )
+                    SELECT deduplicated.seed_chunk_key, deduplicated.relation,
+                           deduplicated.detail, chunk.chunk_key, chunk.content,
+                           chunk.metadata
+                    FROM deduplicated
+                    JOIN repository_chunks AS chunk
+                      ON chunk.repository_id = %s
+                     AND chunk.chunk_key = deduplicated.neighbor_chunk_key
+                    ORDER BY
+                        CASE deduplicated.relation
+                            WHEN 'calls' THEN 1
+                            WHEN 'called_by' THEN 1
+                            WHEN 'imports' THEN 2
+                            WHEN 'imported_by' THEN 2
+                            WHEN 'tests' THEN 1
+                            WHEN 'tested_by' THEN 1
+                            ELSE 3
+                        END,
+                        deduplicated.seed_chunk_key,
+                        chunk.chunk_key
+                    LIMIT %s
+                    """,
+                    (
+                        list(seed_chunk_keys),
+                        list(seed_chunk_keys),
+                        list(seed_chunk_keys),
+                        repository_id,
+                        list(seed_chunk_keys),
+                        list(seed_chunk_keys),
+                        list(seed_chunk_keys),
+                        repository_id,
+                        limit,
+                    ),
+                )
+                results: list[GraphSearchMatch] = []
+                for row in await cursor.fetchall():
+                    metadata = row["metadata"]
+                    results.append(
+                        GraphSearchMatch(
+                            seed_chunk_key=str(row["seed_chunk_key"]),
+                            relation=cast(GraphTraversalRelation, str(row["relation"])),
+                            detail=str(row["detail"]) if row["detail"] else None,
+                            match=SearchMatch(
+                                chunk_key=str(row["chunk_key"]),
+                                path=str(metadata["path"]),
+                                start_line=int(metadata["start_line"]),
+                                end_line=int(metadata["end_line"]),
+                                text=str(row["content"]),
+                                score=0.0,
+                            ),
+                        )
+                    )
+                return results
+        except psycopg.Error as exc:
+            raise RepositoryStoreError(
+                f"Could not expand repository chunk graph: {exc}"
+            ) from exc
 
     async def _connect(self, *, register_vectors: bool = True):
         """Open a short-lived async connection that returns dict-like rows.

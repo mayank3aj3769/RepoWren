@@ -3,8 +3,9 @@
 RepoWren is a modular monolith with three external Docker services. The Python
 application owns user interaction, repository safety, CPU embeddings, and
 orchestration; vLLM owns chat-model loading and GPU execution, while PostgreSQL
-with pgvector stores repository chunks and their JSON metadata and vectors.
-Elasticsearch stores the same safe chunk text and location metadata for BM25.
+with pgvector stores repository chunks, their JSON metadata and vectors, and a
+small deterministic relationship graph. Elasticsearch stores the same safe
+chunk text and location metadata for BM25.
 
 ```mermaid
 flowchart TD
@@ -31,20 +32,24 @@ The current milestone provides a repository-aware local chat path:
 1. `repowren-chat` reads a prompt and keeps the active conversation in memory.
    The Next.js UI offers the same flow in a browser.
 2. Repository commands register, select, list, read, and search local Git roots.
-3. Registration splits safe text into 20-line blocks, embeds them on CPU, and
-   fully replaces that repository's chunk rows.
-4. Search asks vLLM for one semantic query and up to eight exact-text strings,
-   embeds the semantic query once, then asks pgvector for 20 semantic candidates
-   and Elasticsearch for 20 lexical candidates concurrently.
-5. A small Reciprocal Rank Fusion function combines the two ranked lists by a
+3. A four-node LangGraph indexing workflow scans and syntax-chunks safe text,
+   embeds it on CPU, links relationships, and persists a complete snapshot.
+4. A five-node LangGraph retrieval workflow plans, retrieves, fuses rankings,
+   expands relationships, and assembles bounded prompt context.
+5. Planning produces one semantic query, up to three cross-questions, and up to
+   eight exact-text probes. Every semantic question receives its own 20-result
+   pgvector ranking; Elasticsearch returns a 20-result lexical ranking.
+6. A small Reciprocal Rank Fusion function combines all ranked lists by a
    deterministic chunk key and returns the requested number of results.
-6. Repository-aware chat prepends the five highest-ranked hybrid chunks to
-   validated messages.
-7. `ChatService` coordinates the request without depending on Docker details.
-8. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
+7. The five highest-ranked hybrid chunks seed a bounded two-hop graph expansion.
+   At most eight related chunks are appended without changing hybrid scores.
+8. Repository-aware chat labels retrieval seeds and graph evidence separately
+   before prepending them to validated messages.
+9. `ChatService` coordinates the request without depending on Docker details.
+10. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
    endpoint.
-9. Generated text deltas become small newline-delimited API events.
-10. The terminal client prints each token as it arrives.
+11. Repository chat emits its retrieval trace before generated text deltas.
+12. The terminal client prints each token as it arrives.
 
 RepoWren and vLLM remain separate processes. The API loads only the small CPU
 embedding model; it does not install vLLM, load the chat model, reserve GPU
@@ -64,21 +69,37 @@ messages, paths, searches, result counts, token counts, and temperature.
 
 `service.py` owns the repository security boundary. It canonicalizes Git roots,
 rejects traversal and symlink escape, respects root `.gitignore`, skips secrets,
-binary/generated/model files, and bounds file sizes and result counts. It uses
-fixed 20-line chunks so the first implementation is easy to inspect. Repeating
+binary/generated/model files, and bounds file sizes and result counts. Python
+top-level functions and classes remain whole up to 100 lines; large symbols are
+split into bounded non-overlapping parts. Other text uses 60-line windows with
+eight lines of overlap. Repeating
 registration performs a complete rebuild rather than incremental hashing. The
 same in-memory safe chunks feed PostgreSQL first and Elasticsearch second.
 
+Before the PostgreSQL replacement, RepoWren builds `adjacent` edges for all
+chunked files. It uses Python's standard-library AST to add conservative
+`calls`, module-aware relative `imports`, and `tests` edges for `.py` files.
+Calls link only when the simple symbol name has exactly one definition in the
+repository. Syntax errors, ambiguous definitions, self-links, and unknown
+endpoints are ignored rather than guessed. Graph construction is capped
+globally and per source chunk.
+
 The planner uses the existing vLLM chat adapter with temperature zero and a
-small JSON-only prompt. Its output is bounded and validated; malformed JSON
+small JSON-only prompt. It produces a semantic query, lexical probes, and
+complementary cross-questions. Its output is bounded and validated; malformed JSON
 or an unavailable planner falls back to using the original query for both
-searches. Search does not compare incompatible cosine and BM25 scores. Each candidate at
+searches. Every semantic query and the lexical backend contribute a separate
+ranking. Search does not compare incompatible cosine and BM25 scores. Each candidate at
 one-based rank `r` receives `1 / (60 + r)`, and a chunk present in both lists
 receives both contributions. `chunk_key` values such as
-`7:src/pricing.py:1:20` identify the same logical chunk across both stores. The
+`7:src/pricing.py:21:68` identify the same logical chunk across both stores. The
 pure RRF function uses stable first-seen ordering only to break exact ties.
-The explicit search API includes the validated query plan beside the matches,
-and the terminal prints both backend query inputs before the aggregate ranking.
+The explicit search API includes the validated query plan beside the matches.
+Its separate `graph_matches` list includes each related chunk, its seed, and the
+relationship used. Graph matches receive no synthetic relevance score and never
+replace hybrid seeds. Expansion is at most two hops, records traversal depth,
+excludes chunks already selected, deduplicates neighbors, and is bounded by the
+caller.
 
 ### `repowren/embeddings.py`
 
@@ -123,9 +144,10 @@ same API without changing the backend.
 
 ### `web`
 
-The local Next.js application mirrors the terminal client. It lists and selects
-registered repositories, streams repository-aware chat, displays the semantic
-and exact-text search plan beside RRF-ranked results, and browses safe files.
+The local Next.js application is a chat-first client. It lists and selects
+registered repositories, streams repository-aware chat, and displays the latest
+query plan, RRF-ranked seeds, graph relationships, and traversal depth in the
+chat view. It has no separate search or file-browser surface.
 Its server rewrites `/api/repowren/*` to the configured local FastAPI URL, so no
 browser CORS policy or duplicate backend routes are required. Conversation
 history remains browser memory only, matching the terminal's local session.
@@ -180,8 +202,9 @@ RepoWren.
 ## Testing boundaries
 
 Offline tests use fake inference, embedding, storage, and lexical-search
-backends. They test repository boundaries, ignored files, LLM plan parsing,
-shared chunk identity, RRF ordering, context construction, Elasticsearch
+backends. They test repository boundaries, ignored files, LangGraph node
+structure, syntax-aware chunking, LLM plan parsing, shared chunk identity, RRF
+ordering, graph construction, context construction, Elasticsearch
 request translation, validation, event ordering, and terminal output without
 Docker, a GPU, a database, or a model download.
 
@@ -197,10 +220,12 @@ Hardware validation is intentionally separate:
 
 Phase 2 is read-only. Repository tools cannot modify source, execute commands,
 or perform Git operations. PostgreSQL and Elasticsearch contain regenerable
-copies of safe source chunks for semantic and lexical retrieval. They cannot
+copies of safe source chunks for semantic and lexical retrieval. PostgreSQL
+graph edges contain only deterministic chunk keys, relation names, and optional
+symbol or module names. PostgreSQL and Elasticsearch cannot
 share a transaction: PostgreSQL is replaced first, Elasticsearch second, and a
 lexical failure is reported clearly. Re-registering performs the simple repair.
-Later milestones can add better
-chunking and vector indexes, approval-controlled patches and tests, then
+Later milestones can add measured retrieval evaluation and vector indexes,
+approval-controlled patches and tests, then
 approval-controlled Git operations. The terminal client, FastAPI boundary, and
 inference interface can remain unchanged as those capabilities grow.

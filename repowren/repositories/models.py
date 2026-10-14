@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 def build_chunk_key(
@@ -66,3 +67,41 @@ class SearchMatch:
     end_line: int
     text: str
     score: float
+
+
+GraphRelation = Literal["adjacent", "calls", "imports", "tests"]
+GraphTraversalRelation = Literal[
+    "adjacent",
+    "calls",
+    "called_by",
+    "imports",
+    "imported_by",
+    "tests",
+    "tested_by",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryGraphEdge:
+    """One deterministic relationship between two safe repository chunks.
+
+    For example, a chunk containing ``calculate_total()`` may have a ``calls``
+    edge to the chunk that defines ``calculate_total``. ``detail`` stores that
+    symbol name so graph-expanded context can explain why it was included.
+    """
+
+    source_chunk_key: str
+    target_chunk_key: str
+    relation: GraphRelation
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GraphSearchMatch:
+    """A bounded graph neighbor plus provenance back to the previous hop."""
+
+    seed_chunk_key: str
+    relation: GraphTraversalRelation
+    detail: str | None
+    match: SearchMatch
+    depth: int = 1

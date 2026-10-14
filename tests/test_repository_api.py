@@ -13,7 +13,9 @@ from repowren.api.app import create_app
 from repowren.api.schemas import ChatMessage
 from repowren.lexical import LexicalSearchError
 from repowren.repositories.models import (
+    GraphSearchMatch,
     RepositoryChunk,
+    RepositoryGraphEdge,
     RepositoryRecord,
     SearchMatch,
     build_chunk_key,
@@ -82,6 +84,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.repositories: list[RepositoryRecord] = []
         self.chunks: dict[int, list[RepositoryChunk]] = {}
+        self.graph_edges: dict[int, list[RepositoryGraphEdge]] = {}
 
     async def initialize(self) -> None:
         return None
@@ -114,8 +117,10 @@ class MemoryStore:
         self,
         repository_id: int,
         chunks: Sequence[RepositoryChunk],
+        graph_edges: Sequence[RepositoryGraphEdge],
     ) -> None:
         self.chunks[repository_id] = list(chunks)
+        self.graph_edges[repository_id] = list(graph_edges)
 
     async def search_chunks(
         self,
@@ -140,6 +145,59 @@ class MemoryStore:
             )
             for chunk in self.chunks[repository_id][:limit]
         ]
+
+    async def graph_neighbors(
+        self,
+        repository_id: int,
+        seed_chunk_keys: Sequence[str],
+        limit: int,
+    ) -> list[GraphSearchMatch]:
+        seeds = set(seed_chunk_keys)
+        chunks_by_key = {
+            build_chunk_key(
+                repository_id,
+                str(chunk.metadata["path"]),
+                int(chunk.metadata["start_line"]),
+                int(chunk.metadata["end_line"]),
+            ): chunk
+            for chunk in self.chunks.get(repository_id, [])
+        }
+        results: list[GraphSearchMatch] = []
+        seen: set[str] = set()
+        for edge in self.graph_edges.get(repository_id, []):
+            if edge.source_chunk_key in seeds:
+                seed_key, neighbor_key = edge.source_chunk_key, edge.target_chunk_key
+                relation = edge.relation
+            elif edge.target_chunk_key in seeds:
+                seed_key, neighbor_key = edge.target_chunk_key, edge.source_chunk_key
+                relation = {
+                    "calls": "called_by",
+                    "imports": "imported_by",
+                }.get(edge.relation, edge.relation)
+            else:
+                continue
+            if neighbor_key in seeds or neighbor_key in seen:
+                continue
+            chunk = chunks_by_key[neighbor_key]
+            seen.add(neighbor_key)
+            results.append(
+                GraphSearchMatch(
+                    seed_chunk_key=seed_key,
+                    relation=relation,
+                    detail=edge.detail,
+                    match=SearchMatch(
+                        chunk_key=neighbor_key,
+                        path=str(chunk.metadata["path"]),
+                        start_line=int(chunk.metadata["start_line"]),
+                        end_line=int(chunk.metadata["end_line"]),
+                        text=chunk.content,
+                        score=0.0,
+                    ),
+                )
+            )
+            if len(results) == limit:
+                break
+        return results
 
 
 class CapturingInference:
@@ -168,7 +226,8 @@ class CapturingInference:
             assert temperature == 0.0
             yield (
                 '{"embedding_query":"compute an item total",'
-                '"lexical_queries":["calculate_total","sum(items)"]}'
+                '"lexical_queries":["calculate_total","sum(items)"],'
+                '"cross_questions":["Who calls calculate_total?"]}'
             )
             return
         yield "repository answer"
@@ -222,14 +281,16 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
             assert search.json()["query_plan"] == {
                 "embedding_query": "compute an item total",
                 "lexical_queries": ["calculate_total", "sum(items)"],
+                "cross_questions": ["Who calls calculate_total?"],
             }
             assert search.json()["matches"][0] == {
                 "path": "app.py",
                 "start_line": 1,
                 "end_line": 2,
                 "text": "def calculate_total(items):\n    return sum(items)",
-                "score": pytest.approx(2 / 61),
+                "score": pytest.approx(3 / 61),
             }
+            assert search.json()["graph_matches"] == []
 
             chat = await client.post(
                 "/v1/repositories/1/chat/stream",
@@ -241,6 +302,10 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
             )
             assert chat.status_code == 200
             events = [json.loads(line) for line in chat.text.splitlines()]
+            assert events[0]["type"] == "retrieval"
+            assert events[0]["query_plan"]["cross_questions"] == [
+                "Who calls calculate_total?"
+            ]
             assert events[-1] == {"type": "done"}
 
     asyncio.run(exercise_api())

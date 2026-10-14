@@ -18,7 +18,7 @@ COMMAND_HELP = """Commands:
   /repo use <id>     Select a registered repository
   /files [query]     List files in the selected repository
   /read <path>       Read a UTF-8 file from the selected repository
-  /search <query>    Search indexed source chunks by meaning and exact words
+  /search <query>    Search source and show bounded graph-related context
   /help              Show this help
   /exit              Quit"""
 
@@ -191,6 +191,17 @@ def _handle_command(
             )
         if not matches:
             print("No matches.")
+        graph_matches = search.get("graph_matches", [])
+        if graph_matches:
+            print("Related graph context (not relevance-ranked):")
+        for match in graph_matches:
+            detail = f" ({match['detail']})" if match.get("detail") else ""
+            print(
+                f"{match['path']}:{match['start_line']}-{match['end_line']} "
+                f"via {match['seed_path']}:{match['seed_start_line']}-"
+                f"{match['seed_end_line']} {match['relation']}{detail}\n"
+                f"{match['text']}"
+            )
         return True, active_repository_id
 
     if command.startswith("/"):
