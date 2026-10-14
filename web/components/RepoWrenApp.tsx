@@ -11,7 +11,11 @@ import {
   streamChat,
 } from "@/lib/api";
 
-type UiMessage = ChatMessage & { id: string; retrieval?: SearchResponse };
+type UiMessage = ChatMessage & {
+  id: string;
+  retrieval?: SearchResponse;
+  failed?: boolean;
+};
 
 function makeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -190,7 +194,14 @@ export function RepoWrenApp() {
     const userMessage: UiMessage = { id: makeId(), role: "user", content };
     const assistantId = makeId();
     const outbound = [
-      ...messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
+      ...messages
+        // Failure notices belong to the UI, not the model conversation. The
+        // prefix check also excludes notices created before `failed` existed.
+        .filter(
+          (message) =>
+            !message.failed && !message.content.startsWith("Request failed:"),
+        )
+        .map(({ role, content: messageContent }) => ({ role, content: messageContent })),
       { role: "user" as const, content },
     ].slice(-32);
 
@@ -242,7 +253,7 @@ export function RepoWrenApp() {
       setMessages((current) =>
         current.map((item) =>
           item.id === assistantId && !item.content
-            ? { ...item, content: `Request failed: ${message}` }
+            ? { ...item, content: `Request failed: ${message}`, failed: true }
             : item,
         ),
       );

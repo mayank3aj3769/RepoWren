@@ -14,7 +14,7 @@ from repowren.inference.vllm import VLLMClient
 
 def _settings() -> Settings:
     return Settings(
-        model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+        model_id="Qwen/Qwen2.5-Coder-3B-Instruct-AWQ",
         vllm_base_url="http://vllm.test",
     )
 
@@ -28,7 +28,7 @@ def test_stream_chat_extracts_vllm_sse() -> None:
             assert request.method == "POST"
             payload = json.loads(request.read())
             assert payload == {
-                "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+                "model": "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ",
                 "messages": [{"role": "user", "content": "count"}],
                 "max_tokens": 8,
                 "temperature": 0.0,

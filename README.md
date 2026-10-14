@@ -26,9 +26,9 @@ execution, and Git mutations remain intentionally out of scope.
 - Node.js 20.9 or newer for the Next.js web UI.
 - Enough storage for the vLLM image and the selected Hugging Face model.
 
-The default model is `Qwen/Qwen2.5-Coder-0.5B-Instruct`. It is intentionally
-small enough for initial validation on a GTX 1650 with 4 GB VRAM. Larger models
-are outside the current milestone.
+The default model is `Qwen/Qwen2.5-Coder-3B-Instruct-AWQ`. Its 4-bit AWQ
+weights fit on the validated GTX 1650 with 4 GB VRAM while providing a useful
+quality upgrade over the former 0.5B model. GPU headroom remains limited.
 
 ## Configure RepoWren
 
@@ -43,7 +43,7 @@ default public model does not require one. Important settings include:
 
 ```dotenv
 VLLM_IMAGE=vllm/vllm-openai:v0.31.0-cu129
-VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+VLLM_MODEL_ID=Qwen/Qwen2.5-Coder-3B-Instruct-AWQ
 VLLM_BASE_URL=http://127.0.0.1:8001
 VLLM_PORT=8001
 REPOWREN_API_URL=http://127.0.0.1:8000
@@ -243,7 +243,8 @@ The probe reports time to first text and total request time. Docker Desktop and
 - The first container start may be slow while the image and model are
   downloaded. Inspect `docker compose logs -f vllm` before assuming it failed.
 - If vLLM runs out of memory, reduce `VLLM_MAX_MODEL_LEN` or
-  `VLLM_GPU_MEMORY_UTILIZATION`; do not select a larger model for this GPU.
+  `VLLM_GPU_MEMORY_UTILIZATION`; the default 3B AWQ model is already near the
+  practical limit for a 4 GB GPU.
 - If port `8001` is occupied, change both `VLLM_PORT` and `VLLM_BASE_URL` in
   `.env`.
 - If port `5432` is occupied, change `POSTGRES_PORT` and the port in

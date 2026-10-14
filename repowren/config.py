@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-DEFAULT_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_DATABASE_URL = "postgresql://repowren:repowren@127.0.0.1:5432/repowren"

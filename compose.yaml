@@ -58,7 +58,7 @@ services:
       - vllm-cache:/root/.cache/vllm
     command:
       - --model
-      - ${VLLM_MODEL_ID:-Qwen/Qwen2.5-Coder-0.5B-Instruct}
+      - ${VLLM_MODEL_ID:-Qwen/Qwen2.5-Coder-3B-Instruct-AWQ}
       - --host
       - 0.0.0.0
       - --port
@@ -66,7 +66,7 @@ services:
       - --max-model-len
       - "${VLLM_MAX_MODEL_LEN:-4096}"
       - --gpu-memory-utilization
-      - "${VLLM_GPU_MEMORY_UTILIZATION:-0.75}"
+      - "${VLLM_GPU_MEMORY_UTILIZATION:-0.78}"
       - --dtype
       - ${VLLM_DTYPE:-half}
       - --enforce-eager
