@@ -22,6 +22,7 @@ from repowren.repositories.service import (
     RepositoryService,
     build_repository_graph,
     chunk_ranges,
+    embedding_text,
     fuse_search_results,
     parse_search_plan,
 )
@@ -267,6 +268,10 @@ def _make_repository(tmp_path) -> None:
     (tmp_path / "ignored.py").write_text("secret = True\n", encoding="utf-8")
     (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
     (tmp_path / "binary.dat").write_bytes(b"a\x00b")
+    (tmp_path / "analysis.ipynb").write_text(
+        '{"cells":[{"cell_type":"code","source":["TOKEN = secret"]}]}',
+        encoding="utf-8",
+    )
 
 
 def test_register_stores_simple_chunks_and_metadata(tmp_path) -> None:
@@ -296,6 +301,7 @@ def test_register_stores_simple_chunks_and_metadata(tmp_path) -> None:
     assert build_chunk_key(repository.id, "src/main.py", 1, 25) == (
         "1:src/main.py:1:25"
     )
+    assert "analysis.ipynb" not in paths
 
 
 def test_read_search_context_and_exclusions_are_repository_bounded(tmp_path) -> None:
@@ -315,9 +321,14 @@ def test_read_search_context_and_exclusions_are_repository_bounded(tmp_path) -> 
     assert lexical.last_search_limit == 20
     assert embeddings.last_texts == [
         "calculate an item total",
+        "find the implementation",
         "Who calls calculate_total?",
     ]
-    assert lexical.last_queries == ("calculate_total", "sum(items)")
+    assert lexical.last_queries == (
+        "calculate_total",
+        "sum(items)",
+        "find the implementation",
+    )
 
     context = asyncio.run(service.build_context(repository, "Explain the code"))
     assert inference.messages[-1].content == "Explain the code"
@@ -330,6 +341,55 @@ def test_read_search_context_and_exclusions_are_repository_bounded(tmp_path) -> 
         service.read_file(repository, ".env")
     with pytest.raises(RepositoryAccessError, match="excluded"):
         service.read_file(repository, "ignored.py")
+    with pytest.raises(RepositoryAccessError, match="excluded"):
+        service.read_file(repository, "analysis.ipynb")
+
+
+def test_retrieval_hides_excluded_paths_from_stale_indexes(tmp_path) -> None:
+    """New safety rules apply immediately, before a full re-index completes."""
+    (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    repository = RepositoryRecord(1, "example", str(tmp_path), True)
+    safe = RepositoryChunk(
+        content="def main():\n    return 1",
+        metadata={"path": "src/main.py", "start_line": 1, "end_line": 2},
+        embedding=[1.0, 0.0, 0.0],
+    )
+    notebook = RepositoryChunk(
+        content='{"outputs":["secret"]}',
+        metadata={"path": "analysis.ipynb", "start_line": 1, "end_line": 1},
+        embedding=[1.0, 0.0, 0.0],
+    )
+    ignored = RepositoryChunk(
+        content="secret = True",
+        metadata={"path": "ignored.py", "start_line": 1, "end_line": 1},
+        embedding=[1.0, 0.0, 0.0],
+    )
+    store = MemoryStore()
+    store.repositories.append(repository)
+    store.chunks[repository.id] = [notebook, ignored, safe]
+    store.graph_edges[repository.id] = [
+        RepositoryGraphEdge(
+            source_chunk_key=build_chunk_key(1, "src/main.py", 1, 2),
+            target_chunk_key=build_chunk_key(1, "analysis.ipynb", 1, 1),
+            relation="calls",
+            detail="notebook_helper",
+        )
+    ]
+    lexical = FakeLexicalIndex()
+    lexical.chunks[repository.id] = [notebook, ignored, safe]
+    service = RepositoryService(
+        store,
+        FakeEmbeddings(),
+        lexical,
+        FakeQueryInference(),
+    )
+
+    _, matches, graph_matches = asyncio.run(
+        service.search_code_with_graph(repository, "find main", max_results=10)
+    )
+
+    assert [match.path for match in matches] == ["src/main.py"]
+    assert graph_matches == []
 
 
 def test_reregister_replaces_the_old_chunk_snapshot(tmp_path) -> None:
@@ -447,8 +507,52 @@ def test_python_chunking_keeps_normal_symbols_whole_and_splits_large_symbols() -
     assert ranges[2][2] == {
         "chunk_kind": "python_symbol",
         "symbol": "large",
+        "qualified_symbol": "large",
         "part": 1,
     }
+
+
+def test_large_python_class_is_split_at_method_boundaries() -> None:
+    lines = ["class Checkout:", "    def price(self):"]
+    lines.extend(["        total = 1" for _ in range(60)])
+    lines.append("    def submit(self):")
+    lines.extend(["        saved = True" for _ in range(60)])
+
+    ranges = chunk_ranges("src/checkout.py", lines)
+
+    assert ranges[0] == (
+        1,
+        1,
+        {
+            "chunk_kind": "python_class_header",
+            "symbol": "Checkout",
+            "qualified_symbol": "Checkout",
+        },
+    )
+    assert ranges[1][0:2] == (2, 62)
+    assert ranges[1][2]["qualified_symbol"] == "Checkout.price"
+    assert ranges[2][0:2] == (63, 123)
+    assert ranges[2][2]["qualified_symbol"] == "Checkout.submit"
+
+
+def test_embedding_text_adds_structure_without_changing_stored_source() -> None:
+    source = "def total():\n    return 1"
+
+    prepared = embedding_text(
+        source,
+        {
+            "path": "src/pricing.py",
+            "start_line": 4,
+            "end_line": 5,
+            "chunk_kind": "python_method",
+            "qualified_symbol": "Pricing.total",
+        },
+    )
+
+    assert prepared.startswith(
+        "Path: src/pricing.py\nSymbol: Pricing.total\nKind: python_method\n"
+    )
+    assert prepared.endswith(source)
 
 
 def test_graph_builder_adds_adjacent_calls_and_imports_but_skips_ambiguity() -> None:

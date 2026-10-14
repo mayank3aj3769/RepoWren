@@ -44,6 +44,41 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+function EvidenceTrace({ trace }: { trace: SearchResponse }) {
+  const queryLines = [
+    `Semantic: ${trace.query_plan.embedding_query}`,
+    ...trace.query_plan.lexical_queries.map((query) => `Exact text: ${query}`),
+    ...trace.query_plan.cross_questions.map((question) => `Cross-question: ${question}`),
+  ];
+
+  return (
+    <details className="evidence-trace" open>
+      <summary>
+        <span>Evidence trace</span>
+        <small>{trace.matches.length} ranked seeds · {trace.graph_matches.length} linked chunks</small>
+      </summary>
+      <div className="evidence-list">
+        <details className="context-card">
+          <summary><span>Query plan</span><small>{trace.query_plan.cross_questions.length} cross-questions</small></summary>
+          <pre>{queryLines.join("\n")}</pre>
+        </details>
+        {trace.matches.map((match, index) => (
+          <details className="context-card" key={`seed-${match.path}-${match.start_line}-${index}`}>
+            <summary><span>{match.path}</span><small>seed · lines {match.start_line}-{match.end_line}</small></summary>
+            <pre>{match.text}</pre>
+          </details>
+        ))}
+        {trace.graph_matches.map((match, index) => (
+          <details className="context-card" key={`graph-${match.path}-${match.start_line}-${match.relation}-${index}`}>
+            <summary><span>{match.path}</span><small>depth {match.depth} · {match.relation}{match.detail ? ` (${match.detail})` : ""}</small></summary>
+            <pre>{match.text}</pre>
+          </details>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export function RepoWrenApp() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -64,11 +99,6 @@ export function RepoWrenApp() {
     () => repositories.find((repository) => repository.id === selectedId) ?? null,
     [repositories, selectedId],
   );
-  const latestTrace = useMemo(
-    () => [...messages].reverse().find((message) => message.retrieval)?.retrieval ?? null,
-    [messages],
-  );
-
   async function refreshRepositories(preferredId?: number) {
     const items = await api.repositories();
     setRepositories(items);
@@ -266,21 +296,15 @@ export function RepoWrenApp() {
         <header className="workspace-header"><div><span className="eyebrow">{selectedRepository ? "Repository chat" : "Assistant"}</span><h1>{selectedRepository?.name ?? "General chat"}</h1><p>{selectedRepository?.root_path ?? "Talk directly to the local model."}</p></div></header>
         {notice && <div className="notice" role="alert"><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss">×</button></div>}
         <section className="chat-view">
-          {selectedRepository && (
-            <aside className="context-panel">
-              <div className="context-panel-header"><div><span className="eyebrow">GraphRAG trace</span><strong>{latestTrace ? `${latestTrace.matches.length} ranked seeds · ${latestTrace.graph_matches.length} linked chunks` : "Ask a question to inspect retrieval"}</strong></div><button className="text-button" type="button" onClick={clearChat} disabled={chatBusy || !messages.length}>Clear chat</button></div>
-              {latestTrace ? (
-                <div className="context-list">
-                  <details className="context-card"><summary><span>Query plan</span><small>{latestTrace.query_plan.cross_questions.length} cross-questions</small></summary><pre>{[latestTrace.query_plan.embedding_query, ...latestTrace.query_plan.cross_questions].join("\n")}</pre></details>
-                  {latestTrace.matches.map((match) => <details className="context-card" key={`seed-${match.path}-${match.start_line}`}><summary><span>{match.path}</span><small>seed · lines {match.start_line}-{match.end_line}</small></summary><pre>{match.text}</pre></details>)}
-                  {latestTrace.graph_matches.map((match) => <details className="context-card" key={`graph-${match.path}-${match.start_line}`}><summary><span>{match.path}</span><small>depth {match.depth} · {match.relation}{match.detail ? ` (${match.detail})` : ""}</small></summary><pre>{match.text}</pre></details>)}
-                </div>
-              ) : <p className="context-empty">Planning, hybrid retrieval, reciprocal-rank fusion, and relationship expansion now run inside the chat workflow.</p>}
-            </aside>
-          )}
           <div className="conversation" aria-live="polite">
             {messages.length === 0 ? <EmptyState title={selectedRepository ? `Ask about ${selectedRepository.name}` : "Ask RepoWren"} body={selectedRepository ? "Chat plans multiple searches, fuses their rankings, and follows code relationships before answering." : "Select a repository for source-aware answers, or chat with the local model."} /> : messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}><span className="message-label">{message.role === "user" ? "You" : "RepoWren"}</span><div>{message.content || (chatBusy ? <span className="typing">● ● ●</span> : "")}</div></article>
+              <article className={`message ${message.role}`} key={message.id}>
+                <span className="message-label">{message.role === "user" ? "You" : "RepoWren"}</span>
+                <div className="message-body">
+                  <div className="message-content">{message.content || (chatBusy ? <span className="typing">● ● ●</span> : "")}</div>
+                  {message.retrieval && <EvidenceTrace trace={message.retrieval} />}
+                </div>
+              </article>
             ))}
             {chatStatus && <div className="chat-status">{chatStatus}</div>}
             <div ref={messagesEnd} />

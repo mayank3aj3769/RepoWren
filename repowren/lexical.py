@@ -21,6 +21,9 @@ INDEX_PROPERTIES = {
     "chunk_key": {"type": "keyword"},
     "repository_id": {"type": "long"},
     "path": {"type": "keyword"},
+    "path_text": {"type": "text"},
+    "symbol": {"type": "text"},
+    "chunk_kind": {"type": "keyword"},
     "start_line": {"type": "integer"},
     "end_line": {"type": "integer"},
     "content": {"type": "text"},
@@ -82,8 +85,28 @@ class ElasticsearchLexicalSearchIndex:
             ) from exc
 
         properties = response[self._index_name]["mappings"].get("properties", {})
+        missing_properties = {
+            field_name: expected
+            for field_name, expected in INDEX_PROPERTIES.items()
+            if field_name not in properties
+        }
+        if missing_properties:
+            try:
+                # Elasticsearch supports adding fields to an existing mapping.
+                # Existing documents remain valid and receive the new values on
+                # the next complete repository registration.
+                await self._client.indices.put_mapping(
+                    index=self._index_name,
+                    properties=missing_properties,
+                )
+            except (ApiError, TransportError) as exc:
+                raise LexicalSearchError(
+                    f"Elasticsearch mapping upgrade failed: {exc}"
+                ) from exc
         for field_name, expected in INDEX_PROPERTIES.items():
             actual_type = properties.get(field_name, {}).get("type")
+            if actual_type is None:
+                continue
             if actual_type != expected["type"]:
                 raise LexicalSearchError(
                     "Elasticsearch index mapping is incompatible: "
@@ -142,27 +165,36 @@ class ElasticsearchLexicalSearchIndex:
         limit: int,
     ) -> list[SearchMatch]:
         """Return BM25 results, strongly favoring planned exact strings."""
-        should_queries = [
-            {
-                "match_phrase": {
-                    "content": {
-                        "query": query,
-                        "boost": 3.0,
-                    }
-                }
-            }
-            for query in queries
-        ]
+        should_queries: list[dict[str, object]] = []
+        for query in queries:
+            should_queries.extend(
+                [
+                    {
+                        "match_phrase": {
+                            "symbol": {"query": query, "boost": 7.0}
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "path_text": {"query": query, "boost": 5.0}
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "content": {"query": query, "boost": 3.0}
+                        }
+                    },
+                ]
+            )
         # The broad match gives Elasticsearch useful recall when no complete
         # phrase exists, while each phrase clause boosts identifiers such as
         # calculate_invoice_total or exact quoted text.
         should_queries.append(
             {
-                "match": {
-                    "content": {
-                        "query": " ".join(queries),
-                        "operator": "or",
-                    }
+                "multi_match": {
+                    "query": " ".join(queries),
+                    "fields": ["symbol^4", "path_text^2", "content"],
+                    "operator": "or",
                 }
             }
         )
@@ -212,6 +244,12 @@ class ElasticsearchLexicalSearchIndex:
             path = str(chunk.metadata["path"])
             start_line = int(chunk.metadata["start_line"])
             end_line = int(chunk.metadata["end_line"])
+            symbol = str(
+                chunk.metadata.get("qualified_symbol")
+                or chunk.metadata.get("symbol")
+                or ""
+            )
+            chunk_kind = str(chunk.metadata.get("chunk_kind") or "")
             chunk_key = build_chunk_key(
                 repository_id,
                 path,
@@ -226,6 +264,9 @@ class ElasticsearchLexicalSearchIndex:
                     "chunk_key": chunk_key,
                     "repository_id": repository_id,
                     "path": path,
+                    "path_text": path,
+                    "symbol": symbol,
+                    "chunk_kind": chunk_kind,
                     "start_line": start_line,
                     "end_line": end_line,
                     "content": chunk.content,

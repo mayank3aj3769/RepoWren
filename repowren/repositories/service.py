@@ -9,7 +9,7 @@ import os
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TypedDict
 
 import pathspec
@@ -111,6 +111,7 @@ EXCLUDED_PATTERNS = (
     "*.pyo",
     "*.gguf",
     "*.safetensors",
+    "*.ipynb",
     "*.bin",
 )
 
@@ -224,7 +225,11 @@ class RepositoryService:
     async def _embed_chunks_node(self, state: IndexingState) -> IndexingState:
         chunk_inputs = state["chunk_inputs"]
         vectors = await asyncio.to_thread(
-            self._embeddings.encode, [content for content, _ in chunk_inputs]
+            self._embeddings.encode,
+            [
+                embedding_text(content, metadata)
+                for content, metadata in chunk_inputs
+            ],
         )
         if len(vectors) != len(chunk_inputs):
             raise RepositoryAccessError(
@@ -391,13 +396,21 @@ class RepositoryService:
         return state["query_plan"], state["matches"], state["graph_matches"]
 
     async def _plan_queries_node(self, state: RetrievalState) -> RetrievalState:
-        return {"query_plan": await self._plan_search_queries(state["query"])}
+        plan = await self._plan_search_queries(state["query"])
+        lexical_queries = _bounded_unique_strings(
+            (*plan.lexical_queries, state["query"]),
+            limit=MAX_LEXICAL_QUERIES,
+        )
+        return {"query_plan": replace(plan, lexical_queries=lexical_queries)}
 
     async def _retrieve_candidates_node(
         self, state: RetrievalState
     ) -> RetrievalState:
         plan = state["query_plan"]
-        semantic_queries = (plan.embedding_query, *plan.cross_questions)
+        semantic_queries = _bounded_unique_strings(
+            (plan.embedding_query, state["query"], *plan.cross_questions),
+            limit=MAX_CROSS_QUESTIONS + 2,
+        )
         vector_rows = await asyncio.to_thread(
             self._embeddings.encode, list(semantic_queries)
         )
@@ -419,9 +432,21 @@ class RepositoryService:
         return {"ranked_matches": list(await asyncio.gather(*tasks))}
 
     async def _fuse_rankings_node(self, state: RetrievalState) -> RetrievalState:
+        # A repository can have an older stored snapshot after exclusion rules
+        # change. Apply the current rules again before any stored text can reach
+        # chat or the evidence trace; re-indexing is still required to reclaim
+        # the stale rows, but they are never exposed in the meantime.
+        allowed_rankings = [
+            [
+                match
+                for match in ranking
+                if self._is_allowed_index_path(state["repository"], match.path)
+            ]
+            for ranking in state["ranked_matches"]
+        ]
         return {
             "matches": fuse_ranked_results(
-                state["ranked_matches"], max_results=state["max_results"]
+                allowed_rankings, max_results=state["max_results"]
             )
         }
 
@@ -435,9 +460,13 @@ class RepositoryService:
         repository_id = state["repository"].id
         seed_keys = [match.chunk_key for match in state["matches"]]
         first_limit = min(limit, max(1, (limit + 1) // 2))
-        first_hop = await self._store.graph_neighbors(
-            repository_id, seed_keys, first_limit
-        )
+        first_hop = [
+            item
+            for item in await self._store.graph_neighbors(
+                repository_id, seed_keys, first_limit
+            )
+            if self._is_allowed_index_path(state["repository"], item.match.path)
+        ]
         selected = list(first_hop)
         known_keys = set(seed_keys)
         known_keys.update(item.match.chunk_key for item in first_hop)
@@ -449,6 +478,10 @@ class RepositoryService:
                 limit - len(selected) + len(seed_keys),
             )
             for item in second_hop:
+                if not self._is_allowed_index_path(
+                    state["repository"], item.match.path
+                ):
+                    continue
                 if item.match.chunk_key in known_keys:
                     continue
                 selected.append(replace(item, depth=2))
@@ -648,6 +681,29 @@ class RepositoryService:
                     continue
                 yield candidate
 
+    def _is_allowed_index_path(
+        self,
+        repository: RepositoryRecord,
+        stored_path: str,
+    ) -> bool:
+        """Reapply path exclusions to results loaded from a stored snapshot.
+
+        For example, a chunk for ``analysis.ipynb`` may predate the notebook
+        exclusion. It must not appear in retrieval or the UI before the user
+        has had a chance to rebuild that repository's index.
+        """
+        normalized = stored_path.replace("\\", "/")
+        posix_path = PurePosixPath(normalized)
+        windows_path = PureWindowsPath(stored_path)
+        if (
+            not normalized
+            or posix_path.is_absolute()
+            or windows_path.is_absolute()
+            or ".." in posix_path.parts
+        ):
+            return False
+        return not self._ignore_spec(Path(repository.root_path)).match_file(normalized)
+
     @staticmethod
     def _ignore_spec(root: Path) -> pathspec.PathSpec:
         """Combine the visible exclusion list with the root .gitignore."""
@@ -760,37 +816,33 @@ def chunk_ranges(
                     node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
                 )
             ]
-            if symbols:
-                result: list[tuple[int, int, dict[str, str | int]]] = []
-                first_start = _node_start_line(symbols[0])
-                if first_start > 1:
-                    result.extend(
-                        _split_range(
-                            1,
-                            first_start - 1,
-                            MAX_PYTHON_CHUNK_LINES,
-                            {"chunk_kind": "python_module"},
-                        )
+            if not symbols:
+                return _split_range(
+                    1,
+                    len(lines),
+                    MAX_PYTHON_CHUNK_LINES,
+                    {"chunk_kind": "python_module"},
+                )
+
+            result: list[tuple[int, int, dict[str, str | int]]] = []
+            first_start = _node_start_line(symbols[0])
+            if first_start > 1:
+                result.extend(
+                    _split_range(
+                        1,
+                        first_start - 1,
+                        MAX_PYTHON_CHUNK_LINES,
+                        {"chunk_kind": "python_module"},
                     )
-                for index, symbol in enumerate(symbols):
-                    start = _node_start_line(symbol)
-                    end = (
-                        _node_start_line(symbols[index + 1]) - 1
-                        if index + 1 < len(symbols)
-                        else len(lines)
-                    )
-                    result.extend(
-                        _split_range(
-                            start,
-                            end,
-                            MAX_PYTHON_CHUNK_LINES,
-                            {
-                                "chunk_kind": "python_symbol",
-                                "symbol": symbol.name,
-                            },
-                        )
-                    )
-                return result
+                )
+            for index, symbol in enumerate(symbols):
+                end = (
+                    _node_start_line(symbols[index + 1]) - 1
+                    if index + 1 < len(symbols)
+                    else len(lines)
+                )
+                result.extend(_python_symbol_ranges(symbol, end))
+            return result
 
     step = GENERIC_CHUNK_LINES - GENERIC_CHUNK_OVERLAP
     windows: list[tuple[int, int, dict[str, str | int]]] = []
@@ -809,6 +861,81 @@ def _node_start_line(
 ) -> int:
     decorator_lines = [decorator.lineno for decorator in node.decorator_list]
     return min([node.lineno, *decorator_lines])
+
+
+def _python_symbol_ranges(
+    symbol: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    end: int,
+) -> list[tuple[int, int, dict[str, str | int]]]:
+    """Keep normal symbols whole and split large classes at method boundaries."""
+    start = _node_start_line(symbol)
+    metadata: dict[str, str | int] = {
+        "chunk_kind": "python_symbol",
+        "symbol": symbol.name,
+        "qualified_symbol": symbol.name,
+    }
+    if not isinstance(symbol, ast.ClassDef) or end - start + 1 <= MAX_PYTHON_CHUNK_LINES:
+        return _split_range(start, end, MAX_PYTHON_CHUNK_LINES, metadata)
+
+    methods = [
+        node
+        for node in symbol.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not methods:
+        return _split_range(start, end, MAX_PYTHON_CHUNK_LINES, metadata)
+
+    ranges: list[tuple[int, int, dict[str, str | int]]] = []
+    first_method_start = _node_start_line(methods[0])
+    if start < first_method_start:
+        ranges.extend(
+            _split_range(
+                start,
+                first_method_start - 1,
+                MAX_PYTHON_CHUNK_LINES,
+                {
+                    "chunk_kind": "python_class_header",
+                    "symbol": symbol.name,
+                    "qualified_symbol": symbol.name,
+                },
+            )
+        )
+    for index, method in enumerate(methods):
+        method_end = (
+            _node_start_line(methods[index + 1]) - 1
+            if index + 1 < len(methods)
+            else end
+        )
+        ranges.extend(
+            _split_range(
+                _node_start_line(method),
+                method_end,
+                MAX_PYTHON_CHUNK_LINES,
+                {
+                    "chunk_kind": "python_method",
+                    "symbol": method.name,
+                    "qualified_symbol": f"{symbol.name}.{method.name}",
+                },
+            )
+        )
+    return ranges
+
+
+def embedding_text(content: str, metadata: dict[str, str | int]) -> str:
+    """Add safe structural labels to the text seen by the embedding model.
+
+    Stored source remains unchanged. For example, a method chunk is embedded as
+    ``Path: src/cart.py\nSymbol: Cart.total\n<source>`` so path and symbol queries
+    have useful semantic signal without polluting chat citations.
+    """
+    labels = [f"Path: {metadata['path']}"]
+    qualified_symbol = metadata.get("qualified_symbol") or metadata.get("symbol")
+    if qualified_symbol:
+        labels.append(f"Symbol: {qualified_symbol}")
+    chunk_kind = metadata.get("chunk_kind")
+    if chunk_kind:
+        labels.append(f"Kind: {chunk_kind}")
+    return "\n".join([*labels, content])
 
 
 def _split_range(
@@ -1129,3 +1256,23 @@ def parse_search_plan(response: str, *, fallback_query: str) -> SearchQueryPlan:
     return SearchQueryPlan(
         embedding_query, tuple(lexical_queries), tuple(cross_questions)
     )
+
+
+def _bounded_unique_strings(
+    values: Sequence[str],
+    *,
+    limit: int,
+) -> tuple[str, ...]:
+    """Keep stable, case-insensitive unique query strings within a hard bound."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = " ".join(value.split())
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        result.append(cleaned)
+        seen.add(key)
+        if len(result) == limit:
+            break
+    return tuple(result)

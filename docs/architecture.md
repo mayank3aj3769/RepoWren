@@ -41,6 +41,9 @@ The current milestone provides a repository-aware local chat path:
    pgvector ranking; Elasticsearch returns a 20-result lexical ranking.
 6. A small Reciprocal Rank Fusion function combines all ranked lists by a
    deterministic chunk key and returns the requested number of results.
+   Current path exclusions are reapplied to stored candidates before fusion, so
+   stale notebook, ignored, or secret-bearing chunks cannot reach chat while a
+   repository is waiting to be re-indexed.
 7. The five highest-ranked hybrid chunks seed a bounded two-hop graph expansion.
    At most eight related chunks are appended without changing hybrid scores.
 8. Repository-aware chat labels retrieval seeds and graph evidence separately
@@ -48,7 +51,8 @@ The current milestone provides a repository-aware local chat path:
 9. `ChatService` coordinates the request without depending on Docker details.
 10. `VLLMClient` checks readiness and calls vLLM's OpenAI-compatible streaming
    endpoint.
-11. Repository chat emits its retrieval trace before generated text deltas.
+11. Repository chat emits its retrieval trace before generated text deltas, and
+    the web UI keeps that trace attached to the corresponding assistant message.
 12. The terminal client prints each token as it arrives.
 
 RepoWren and vLLM remain separate processes. The API loads only the small CPU
@@ -70,9 +74,10 @@ messages, paths, searches, result counts, token counts, and temperature.
 `service.py` owns the repository security boundary. It canonicalizes Git roots,
 rejects traversal and symlink escape, respects root `.gitignore`, skips secrets,
 binary/generated/model files, and bounds file sizes and result counts. Python
-top-level functions and classes remain whole up to 100 lines; large symbols are
-split into bounded non-overlapping parts. Other text uses 60-line windows with
-eight lines of overlap. Repeating
+top-level functions and classes remain whole when bounded; large classes split
+at AST method boundaries, and oversized methods are split into bounded parts.
+Other text uses 60-line windows with eight lines of overlap. Notebook JSON is
+excluded with `*.ipynb` rather than indexed as source. Repeating
 registration performs a complete rebuild rather than incremental hashing. The
 same in-memory safe chunks feed PostgreSQL first and Elasticsearch second.
 
@@ -86,10 +91,14 @@ globally and per source chunk.
 
 The planner uses the existing vLLM chat adapter with temperature zero and a
 small JSON-only prompt. It produces a semantic query, lexical probes, and
-complementary cross-questions. Its output is bounded and validated; malformed JSON
+complementary cross-questions. Its output is bounded and validated; malformed
+JSON
 or an unavailable planner falls back to using the original query for both
-searches. Every semantic query and the lexical backend contribute a separate
-ranking. Search does not compare incompatible cosine and BM25 scores. Each candidate at
+searches. The original request and each semantic cross-question contribute
+separate pgvector rankings. Embedding text is enriched with path, symbol, and
+chunk-kind labels while stored source remains unchanged. Elasticsearch searches
+content, symbol, and path text with explicit field boosts. Search does not
+compare incompatible cosine and BM25 scores. Each candidate at
 one-based rank `r` receives `1 / (60 + r)`, and a chunk present in both lists
 receives both contributions. `chunk_key` values such as
 `7:src/pricing.py:21:68` identify the same logical chunk across both stores. The

@@ -141,22 +141,26 @@ How does function_name work?
 ```
 
 Registering reads allowed UTF-8 files once, keeps ordinary Python functions and
-classes whole (splitting only symbols over 100 lines), and uses overlapping
-60-line windows for other text. It creates CPU embeddings, builds bounded chunk
+classes whole, and splits large classes at AST method boundaries. Other text
+uses overlapping 60-line windows. Notebook JSON (`*.ipynb`) is excluded rather
+than embedded as noisy source. It creates CPU embeddings, builds bounded chunk
 relationships, and replaces
 that repository's PostgreSQL chunks and graph edges in one transaction.
 It then replaces the matching text-only Elasticsearch documents. PostgreSQL is
 written first; if Elasticsearch fails, the API reports the failure instead of
 silently using only semantic results. Register the same path again to rebuild
 both snapshots and repair either index.
+After this retrieval upgrade, re-register each repository once so existing
+Elasticsearch documents receive the new symbol and searchable-path fields.
 
 Indexing and retrieval are explicit LangGraph state graphs. Search asks the
 local vLLM model to turn the user's request into one semantic query, up to three
 cross-questions, and up to eight short exact-text strings such as identifiers,
-error text, or configuration keys. PostgreSQL embeds every semantic question
-and finds conceptually similar code with exact pgvector cosine search, while
-Elasticsearch searches the exact-text strings with boosted phrase matches and
-BM25. RepoWren asks each backend for 20 candidates concurrently and uses
+error text, or configuration keys. PostgreSQL embeds the planned question, the
+original request, and cross-questions; embedding inputs include path and symbol
+labels without changing stored source. Elasticsearch searches content, symbols,
+and paths with field-aware boosts and BM25. RepoWren asks each ranking source
+for 20 candidates concurrently and uses
 Reciprocal Rank Fusion (RRF) to combine their ranks. Raw cosine and BM25 scores
 are never compared. The top hybrid chunks become graph-retrieval seeds. RepoWren
 then adds a bounded two-hop expansion from deterministic `adjacent`, Python
@@ -175,13 +179,17 @@ existing Git repository. RepoWren ignores `.gitignore` entries, secrets such as
 `.env`, binary files, generated directories, model weights, files over 1 MB,
 and paths that escape the repository root.
 
+The implementation brief for the next approved feature is in
+`docs/change-impact-agent-prompt.md`.
+
 ## Use the web UI
 
 The local Next.js application is chat-first: it provides repository registration
 and selection, streamed answers, and an inspectable GraphRAG trace containing
-the query plan, ranked seeds, relationships, and traversal depth. The standalone
-search and file-browser tabs were removed; their diagnostic APIs remain. Install
-and start it after
+the query plan, ranked seeds, relationships, and traversal depth. Each trace is
+attached to its assistant message, so the evidence remains inspectable even if
+answer generation later reports an inference error. The standalone search and
+file-browser tabs were removed; their diagnostic APIs remain. Install and start it after
 the RepoWren API is running:
 
 ```text

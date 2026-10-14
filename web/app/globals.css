@@ -563,11 +563,57 @@ pre {
   color: var(--orange);
 }
 
-.message > div {
+.message-body {
   min-width: 0;
   font-size: 14px;
   line-height: 1.72;
+}
+
+.message-content {
   white-space: pre-wrap;
+}
+
+.evidence-trace {
+  margin-top: 14px;
+  overflow: hidden;
+  background: rgba(255, 253, 248, 0.82);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.evidence-trace > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  color: var(--forest);
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.evidence-trace > summary::-webkit-details-marker {
+  display: none;
+}
+
+.evidence-trace > summary small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.evidence-list {
+  display: grid;
+  max-height: 320px;
+  gap: 6px;
+  padding: 0 10px 10px;
+  overflow-y: auto;
 }
 
 .typing {

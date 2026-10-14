@@ -280,7 +280,11 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
             )
             assert search.json()["query_plan"] == {
                 "embedding_query": "compute an item total",
-                "lexical_queries": ["calculate_total", "sum(items)"],
+                "lexical_queries": [
+                    "calculate_total",
+                    "sum(items)",
+                    "compute a total",
+                ],
                 "cross_questions": ["Who calls calculate_total?"],
             }
             assert search.json()["matches"][0] == {
@@ -288,7 +292,7 @@ def test_repository_endpoints_and_context_chat(tmp_path) -> None:
                 "start_line": 1,
                 "end_line": 2,
                 "text": "def calculate_total(items):\n    return sum(items)",
-                "score": pytest.approx(3 / 61),
+                "score": pytest.approx(4 / 61),
             }
             assert search.json()["graph_matches"] == []
 
